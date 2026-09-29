@@ -1,6 +1,6 @@
-# ADR 0001: The shape of bonyan, a library for building agents
+# ADR 0001: The shape of bonyan, a library for building agent harnesses
 
-**Status:** Accepted (maintainer sign-off recorded by approval of the PR that sets this status)
+**Status:** Accepted, amended (maintainer sign-off recorded by approval of the PR that sets this status and of each PR that amends it, per ADR 0000; see Amendments)
 
 ## Context
 
@@ -15,8 +15,14 @@ programs; each one invents its own memory and its own way of treating fetched te
 tests assert what is *sent* to a model and never what the model *writes*; and none of them can be
 measured against a stable set of real cases before a prompt or model change.
 
-bonyan is a Go **library** (no binary of its own) that owns those parts once, so a program built on
-it describes *what its agent does* and inherits *how an agent runs*.
+bonyan is a Go **library** (no binary of its own) for building a complete agent **harness** with
+minimal code: the loop, model calls, context, memory, tools, approvals, the trust boundary, evaluation
+and telemetry that surround a model, each of them pluggable. It owns those parts once, so a program
+built on it describes *what its agent does* and inherits *how an agent runs*.
+
+bonyan has **no user interface**. A front-end (a chat window, a messaging bot, a command line, a web
+page) and a policy (what may be said, which actions need a person) are separate code that attaches
+to a run through hooks (§12). bonyan provides the hooks, not the front-ends.
 
 ## Decision
 
@@ -24,21 +30,45 @@ bonyan is organised as small packages with one interface each. A program uses wh
 package requires another beyond what is stated here.
 
 **Everything is pluggable and switchable by configuration.** Not only what touches a vendor, a store
-or the network: models, memory backends, context-pipeline stages, tools, secret sources, the approval
-store, recorders, eval scorers and telemetry exporters each sit behind an interface, and every
+or the network: models, memory backends, context-pipeline stages, tools, secret sources, the trust policy (§3),
+hooks (§12), the approval store, recorders, eval scorers and telemetry exporters each sit behind an
+interface, and every
 implementation registers under a name. An agent is assembled from configuration that names the
 implementation for each slot, so swapping one (another model provider, another memory backend,
 another secret store) is a configuration change, not a code change. Each slot ships at least one
 in-repo implementation, and a program can register its own under a new name without forking bonyan.
 
-**Where pluggability stops: the invariants.** The guarantees in this ADR are applied by bonyan
-*around* the slots, never by an implementation inside one, so no configuration and no registered
-implementation can switch them off. They are: the untrusted-content type (trusted text cannot be
-constructed from it outside bonyan, §3), re-marking of recalled facts by source (§4), secret scoping
-and scrubbing (§10), exclusion of memory before anything reaches an exporter or recorder, except operator-enabled full
-recordings (§4, §9),
-the distinct not-cleared result (§7), and the loop's limits (§2, §11). A custom pipeline stage,
-exporter or recorder receives only what has already passed through them.
+**Where pluggability stops: the invariants.** The guarantees below are applied by bonyan *around*
+the slots and hooks, never by an implementation inside one, so no configuration, no registered
+implementation and no hook can switch them off. A custom pipeline stage or hook receives content
+already classified by the trust policy and already scrubbed of secrets, and the trust enforcement
+point runs after all of them, so nothing they produce reaches a model without passing it. An
+exporter or recorder receives only what has passed every guarantee. Each is fixed for a stated
+reason:
+
+- **The trust enforcement point (§3).** Every request passes one point inside bonyan, after every
+  pipeline stage and hook, that applies the configured trust policy. *Why:* a policy that some path
+  can skip is advice, and the placement guarantee holds only if every request crosses the same point.
+- **No conversion from untrusted to trusted (§3, §4, §12).** Once content is classified untrusted,
+  no later stage, hook, policy step or memory round trip turns it into trusted content through
+  bonyan's API. *Why:* if any plugin could do it, every plugin would be a way to launder fetched text
+  into instructions.
+- **Untrusted content is delimited and never in an instruction position (§3, §7).** The trust policy
+  chooses how it is marked, not whether. *Why:* this placement is the one guarantee the boundary
+  gives at the model; without it the untrusted type protects nothing once the request is built.
+  Where this line sits, and what moving it would cost, is set out in §3.
+- **Provenance and the policy's decisions are recorded (§3, §4).** *Why:* a pluggable policy can be
+  wrong, and a decision that leaves no record cannot be audited or corrected.
+- **Secret scoping and scrubbing (§10)**, applied before content reaches context, a hook, a log, a
+  trace or a recording. *Why:* a leaked secret cannot be taken back.
+- **Memory is excluded before anything reaches bonyan's exporters or recorders**, except
+  operator-enabled full recordings (§4, §9). *Why:* exported data lands where bonyan cannot delete by
+  subject.
+- **The distinct not-cleared result (§7).** *Why:* a gate that can read a failure as a pass fails
+  open.
+- **What is approved is what runs (§7, §12).** *Why:* otherwise an approval covers a different
+  action from the one executed.
+- **The loop's limits (§2, §11).** *Why:* a limit a plugin can switch off is not a limit.
 
 ### 1. Model: one interface for different kinds of model
 
@@ -75,12 +105,61 @@ through the program:
 
 - **A token budget is allocated per section**, and trimming is deterministic and recorded, so it is
   always possible to say what was dropped from a call and why.
-- **Fetched content is data, never instructions (§7).** Anything that did not come from the program
-  or the operator (mail, web pages, feed items, user uploads, tool output) is a **distinct type** that
-  the instruction builder does not accept, so it can only enter context inside a delimited,
-  marked section. The mechanism is structural: the pipeline, not each program, owns the boundary.
+- **Untrusted content is data, never instructions (§7).** Untrusted content is a **distinct type**
+  that the instruction builder does not accept, so it can only enter context inside a delimited,
+  marked section. The mechanism is structural: bonyan, not each program, owns the boundary.
   **What this guarantees is placement, not behaviour:** a model may still act on instructions inside
   marked data, which is why §7's approval hook and fail-closed mode exist.
+
+**Trust is a pluggable policy, enforced by bonyan.** What counts as untrusted, how it is marked and
+how it is handled are decided by a **trust policy**, a slot like any other. The point where the policy
+is applied is not a slot.
+
+- **The policy decides three things:**
+  - **classification:** which content is untrusted, by its source. The sources bonyan names are
+    program and operator instructions, user messages, uploads, fetched material, tool output and
+    recalled memory; a program can register further source kinds, and a policy can classify by any
+    of them;
+  - **marking:** how untrusted content is delimited and presented inside its section (the delimiter
+    format, labels, an encoding of the text);
+  - **handling:** what else happens when untrusted content is present, for example requiring
+    approval (§7) for tool calls in a run that has read untrusted content, refusing content over a
+    size, dropping a source, or sending the call to a different configured model.
+- **Classification happens once, where content enters bonyan**: a user message through the run's
+  API, a fetched item through the pipeline, a tool result as it returns, a fact as it is recalled.
+  The policy returns a decision; bonyan builds the typed value from it. A policy never constructs a
+  trusted value itself.
+- **The enforcement point** is the last step before a request reaches a model adapter, after every
+  pipeline stage and hook. Every request passes it, and it applies the policy's marking and handling
+  and checks placement: untrusted content only inside marked sections. No configuration, stage, hook
+  or registered implementation can send a request around it.
+- **A policy failure fails closed.** A policy that errors, panics, exceeds the run's deadline or
+  returns no decision leaves the content untrusted, marked as the default policy marks it.
+- **Every decision is recorded** in the trace and the recording: the source kind, the decision and
+  the policy's name, never the content (§9).
+- **The default policy** classifies everything that did not come from the program or the operator
+  (user messages, uploads, fetched material, tool output, memory extracted from any of those) as
+  untrusted, marks it with a delimited, labelled section, and adds no further handling. A program
+  that configures no policy gets exactly this.
+
+**Where the line between policy and mechanism sits, and what moving it costs.** Classification,
+marking format and handling are pluggable. Three things are fixed: the enforcement point cannot be
+bypassed; once content is classified untrusted nothing converts it to trusted; and untrusted content
+is always delimited and never placed in an instruction position. The fixed part is the mechanism that
+makes any policy mean something; everything that decides *what* is protected is pluggable. The
+line could sit elsewhere, and each position has a cost:
+
+- **As decided, classification is fully pluggable, including declaring a source trusted** (for
+  example the output of a program's own internal tool). This is what makes the policy decide what
+  counts as untrusted. The cost: a policy that classifies outside material as trusted removes the
+  protection for it, and bonyan cannot tell a correct decision of that kind from a wrong one. What
+  bonyan can do is record every decision, so the choice is visible in traces and recordings.
+- **Narrower: a floor.** A policy could add sources to "untrusted" but never declare material from
+  outside the program trusted. This is safer against a mistaken policy, but a policy could then
+  only tighten, so what counts as untrusted would no longer be fully the policy's decision.
+- **Wider: marking pluggable, including off.** A policy could then place untrusted content in
+  instruction positions. The placement guarantee of this section and §7 would then depend on the
+  configuration, and the untrusted type would protect nothing once a request is built.
 
 ### 4. Memory: part of the framework, pluggable
 
@@ -94,10 +173,12 @@ through the program:
   also keeps bonyan's licence independent of the backend's.
 - Long-term extraction may run asynchronously, and the interface says so: a fact from this turn is
   not promised to be recallable on the next one.
-- **Recall re-applies trust by source.** Every record carries its source. A fact extracted from
-  untrusted material is recalled as untrusted (§3) and enters context inside the marked section, not
-  as trusted memory. This is a rule of the memory interface, not left to each backend, so a fact
-  planted by a fetched item cannot come back later as trusted context.
+- **Recall re-applies trust by source.** Every record carries its source and the trust decision it
+  was stored under. On recall the configured trust policy (§3) is applied again to the recorded
+  source, and the stricter of the two decisions wins, so a fact is never recalled as more trusted
+  than the material it was extracted from. A fact extracted from untrusted material enters context
+  inside the marked section, not as trusted memory. This is a rule of the memory interface, not left
+  to each backend, so a fact planted by a fetched item cannot come back later as trusted context.
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
   and its source; a retention period is configurable; deletion by subject is **required to
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
@@ -129,9 +210,11 @@ through the program:
 
 ### 7. Safety boundary
 
-- Untrusted material (§3) is marked, delimited and never concatenated into instruction positions.
-- A **human-in-the-loop hook**: an agent can mark an action as needing approval; the loop suspends
-  it, emits it to a configured approver, and resumes or cancels on the decision. Suspended actions are
+- Content the trust policy classifies as untrusted (§3) is marked, delimited and never concatenated
+  into instruction positions.
+- A **human-in-the-loop hook**: an agent, or the trust policy's handling (§3), can mark an action as
+  needing approval; the loop suspends it and emits it to a configured approver through the approval
+  hook point (§12), and resumes or cancels on the decision. Suspended actions are
   kept in a pluggable store so they survive a restart; with no durable store configured, a restart
   cancels every pending action (fail-closed), it never drops one silently. An approval that arrives for an action
   the loop no longer holds (cancelled by a restart or a timeout) is rejected as unknown, never applied.
@@ -247,11 +330,58 @@ through the program:
   configuration. The pre-call bound above is the only estimate, and it only ever refuses calls; it
   never stands in for a charge.
 
+### 12. Hooks
+
+bonyan has no user interface; front-ends, policies and integrations attach to a run through hooks.
+A hook is registered under a name like any other implementation and selected by configuration, or
+attached in code.
+
+- **Hook points**, for every run:
+  - run start, and run end with its outcome (a final answer, not cleared, or a typed error);
+  - user message in (after the trust policy has classified it) and reply out (the final answer,
+    before it returns to the caller);
+  - before and after each model call;
+  - before and after each tool call;
+  - approval (§7): an action that needs approval is handed to the approver through this point;
+  - memory write and memory recall (§4).
+- **What a hook may do** is stated per point: observe; change the payload (rewrite a message, redact
+  a reply, adjust tool arguments); or deny (a denied tool call is reported to the model as denied; a
+  denied model call, message or reply ends the run with a typed error, and for a gate-type agent
+  that is one more not-cleared case, §7). Several hooks at one point run in their configured order,
+  and any denial wins.
+- **What a hook receives:**
+  - content as typed values: what the policy classified untrusted arrives as untrusted, with its
+    provenance, and trusted text as trusted (§3);
+  - content after secret scrubbing (§10): tool results, model responses and requests have had every
+    resolved secret removed before a hook sees them, and bonyan never hands a hook a secret;
+  - memory contents at the memory hook points, and inside a request wherever the request carries
+    them. A hook is code running in the program's process: like the program's own logging (§4), what
+    a hook does with content it is handed is outside bonyan's reach. bonyan's own exporters and
+    recorders still exclude memory (§4, §9).
+- **No hook API returns trusted content from untrusted content.** A hook that changes a payload
+  returns the same types it was given: where it received an untrusted value it can return only an
+  untrusted value, with provenance. Content a hook adds is recorded with the hook's name. The limit
+  is the one §3's types have: Go cannot stop program code that holds a plain string from building
+  trusted text with it, so the guarantee is about bonyan's paths and API.
+- **Hooks run inside the invariants.** Every request a hook changes still passes the trust
+  enforcement point (§3), which runs after all hooks. A hook runs under the run's deadline, and its
+  time counts toward it. No hook can switch off the trust enforcement point, scrubbing, memory
+  exclusion from exporters and recorders, the not-cleared result or the loop's limits.
+- **What is approved is what runs.** Before-tool-call hooks run first, then approval, then the tool;
+  nothing changes a tool call after it is approved.
+- **A failing hook fails closed.** A hook that errors or panics at a point where it may change or
+  deny counts as a denial. An observe-only hook's failure is recorded and does not change the run.
+- **Re-runs (§8):** hooks do not run in a re-run unless opted in per hook, as with live tool
+  execution, so a re-run does not reach a user or an outside service through a front-end.
+
 ## Consequences
 
 - Programs built on bonyan stop owning these concerns and gain them together; the cost is a shared
   dependency whose interfaces must stay stable, so interface changes follow semantic versioning (before 1.0 a breaking change bumps the minor
-  version, per the release config) and get their own ADR.
+  version, per the release config) and get their own ADR, or before the first release an amendment
+  (ADR 0000).
+- The trust policy and the hook points are part of the stable interface. Adding a hook point later is
+  additive; removing one or changing what it receives is a breaking change.
 - The first releases will ship interfaces and the basic implementations before any program migrates.
   Each migration is its own piece of work in that program's repository.
 - The library stays generic: no instance's topics, names, providers or thresholds appear in code,
@@ -262,3 +392,18 @@ through the program:
 - Package-level API details (method signatures), which follow in the implementation PRs.
 - Which external memory backend or secret store adapters are written first.
 - Hosting: bonyan is a library; where an agent runs is the program's decision.
+- Front-ends and user interfaces: bonyan provides the hooks they attach to (§12), not the front-ends.
+
+## Amendments
+
+- Context: bonyan's aim is stated as a complete agent harness built with minimal code, with no user
+  interface of its own; front-ends and policies attach through hooks.
+- Decision, the invariants: restated with the reason each is fixed, and extended to the trust
+  enforcement point, recorded trust decisions and "what is approved is what runs".
+- §3: the untrusted-content concept became a pluggable trust policy (classification, marking,
+  handling) with a fixed enforcement point inside bonyan and a default policy equal to the behaviour
+  §3 specified before; where the line between policy and mechanism sits, and what moving it costs.
+- §4: recall re-applies the configured trust policy; the stricter decision wins.
+- §7: untrusted means as classified by the policy; the approver is reached through the approval hook
+  point, and the policy's handling can require approval.
+- §12: hooks, new.
