@@ -186,6 +186,9 @@ through the program:
   metrics, the general conventions for everything else. The same conventions are what managed agent
   platforms and observability backends emit and read, so bonyan's telemetry is portable and nothing is
   renamed later. Anything the conventions do not cover gets a `bonyan.*` name, documented in one place.
+  The conventions' **content attributes** (messages, system instructions, tool arguments and results)
+  are exactly §9's content capture: off by default and under the invariants. Following the conventions
+  means using their names, not emitting everything they define.
 - **Redaction at the boundary:** span attributes carry sizes and identifiers, not message content,
   memory contents or secrets. Content capture is an explicit, off-by-default option.
 
