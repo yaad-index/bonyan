@@ -6,7 +6,7 @@
 
 ADR 0001 decides what bonyan is. This ADR decides what it is built with: the house Go conventions and where a library departs from them, the third-party modules the public API rests on, and where the heavier ones live. The implementation plan (`docs/implementation-plan.md`) surveys the candidates per slot; this records the choices that are load-bearing.
 
-Adding a module to a library is costlier than adding it to a program. Every module a library's `go.mod` requires is part of the module graph of every program that uses the library, and takes part in its version selection, even when the program never imports the package that needed it. Module counts below are measured, not estimated: each dependency was imported alone into an empty module on 2026-09-29, tidied, and the modules listed by `go list -m all` counted, excluding the empty module itself.
+Adding a module to a library is costlier than adding it to a program. Every module a library's `go.mod` requires is part of the module graph of every program that uses the library, and takes part in its version selection, even when the program never imports the package that needed it. Module counts below are measured, not estimated: for each dependency one named package was imported alone into an empty module on 2026-09-29, the module tidied, and the modules listed by `go list -m all` counted, excluding the empty module itself. The count depends on the package imported, so each figure names its package.
 
 ## Decision
 
@@ -24,14 +24,14 @@ The house Go conventions apply, with these departures because bonyan is a librar
 
 ### 2. Modules the core rests on
 
-| Module | Version at decision | Modules added | Used for |
-|---|---|---|---|
-| `github.com/modelcontextprotocol/go-sdk` | v1.8.0 | 13 | the tool-server protocol client (ADR 0001 §5) |
-| `github.com/google/jsonschema-go` | v0.4.3 | 2 | schemas generated from Go types, and validation of structured output (§5, §6) |
-| `go.opentelemetry.io/otel` (API packages only) | v1.46.0 | 10 | spans and metrics (§9); the SDK and exporters are the program's |
-| `go.opentelemetry.io/otel/semconv/v1.41.0` | (in otel v1.46.0) | — | GenAI attribute names, pinned, re-exported from one bonyan package (§9) |
-| `golang.org/x/time` | — | — | rate limiting in adapters |
-| `github.com/stretchr/testify` | — | — | tests only |
+| Module | Version at decision | Package imported for the count | Modules added | Used for |
+|---|---|---|---|---|
+| `github.com/modelcontextprotocol/go-sdk` | v1.8.0 | `github.com/modelcontextprotocol/go-sdk/mcp` | 13 | the tool-server protocol client (ADR 0001 §5) |
+| `github.com/google/jsonschema-go` | v0.4.3 | `github.com/google/jsonschema-go/jsonschema` | 2 | schemas generated from Go types, and validation of structured output (§5, §6) |
+| `go.opentelemetry.io/otel` (API packages only) | v1.46.0 | `go.opentelemetry.io/otel/trace` | 10 | spans and metrics (§9); the SDK and exporters are the program's |
+| `go.opentelemetry.io/otel/semconv/v1.41.0` | (in otel v1.46.0) | — | — | GenAI attribute names, pinned, re-exported from one bonyan package (§9) |
+| `golang.org/x/time` | — | — | — | rate limiting in adapters |
+| `github.com/stretchr/testify` | — | — | — | tests only |
 
 The GenAI names are pinned to `semconv/v1.41.0` because later versions of that package no longer carry them: the GenAI conventions moved to a separate specification with no Go package yet. Every GenAI name therefore comes from one bonyan package, so moving to an upstream package later is a change in one place.
 
@@ -39,13 +39,13 @@ The chat-completions-compatible adapter is written on `net/http` rather than on 
 
 ### 3. The basic memory store: SQLite, not the house key-value store
 
-The basic memory backend (ADR 0001 §4) uses `modernc.org/sqlite` (v1.60.0, pure Go, 25 modules), not the house embedded store `go.etcd.io/bbolt` (v1.5.0, 15 modules).
+The basic memory backend (ADR 0001 §4) uses `modernc.org/sqlite` (v1.60.0, pure Go, 25 modules, counted by importing `modernc.org/sqlite`), not the house embedded store `go.etcd.io/bbolt` (v1.5.0, 15 modules, counted by importing `go.etcd.io/bbolt`).
 
 The memory interface requires delete by subject, retention by age and recall. With SQLite these are a `DELETE … WHERE subject = ?`, a `DELETE … WHERE created_at < ?`, and a full-text query (FTS5), each a single statement the database keeps consistent. With a key-value store each needs a secondary index kept consistent by hand, and recall needs a text index written from scratch. The conformance suite (ADR 0001 §4) tests either way, but it is the hand-kept indexes that would need it most. The driver builds with cgo off, so the static-binary convention still holds for programs that use it.
 
 ### 4. Where the heavier dependencies live
 
-Two packages are optional and heavy: the SQLite backend (25 modules), and the exact token counter `tokenize/tiktoken`, built on `github.com/tiktoken-go/tokenizer` (v0.8.1, 4 modules, but its vocabularies are compiled in and its codec sources total about 16 MB).
+Two packages are optional and heavy: the SQLite backend (25 modules), and the exact token counter `tokenize/tiktoken`, built on `github.com/tiktoken-go/tokenizer` (v0.8.1, 4 modules counted by importing that package, but its vocabularies are compiled in and its codec sources total about 16 MB).
 
 **Each gets its own nested module**: `github.com/yaad-index/bonyan/memory/sqlite` and `github.com/yaad-index/bonyan/tokenize/tiktoken`. The root module keeps only what every agent needs (section 2). A program that uses the in-memory reference backend and the byte-bound counter never sees SQLite or the tokenizer in its module graph.
 
