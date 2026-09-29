@@ -147,6 +147,22 @@ through the program:
 - An **eval runner** scores an agent against a set of cases (inputs plus expected properties) and
   reports per-case results and aggregates. A prompt, model or threshold change is meant to be judged
   by this report before it ships.
+- **Evaluators judge behaviour, not just record it.** Pluggable evaluators run over recordings
+  offline and, sampled, over live runs, and report as metrics (§9). The initial set:
+  - **groundedness / hallucination:** claims in an answer checked against the material that was in
+    context (sources, tool results, recalled memory); unsupported claims and invented citations are
+    counted;
+  - **loops:** repeated tool calls with the same arguments, repeated states, and runs that hit the
+    step limit;
+  - **waste:** tokens and cost per completed task, redundant or failed calls, context sent but never
+    used, retries;
+  - **task outcome:** did the run reach a valid final answer, and does it meet the case's expected
+    properties.
+- Some evaluators are deterministic (loops, waste); some need a model (groundedness). A model-based
+  evaluator is itself a measurement with error, so its agreement with hand labels on a sample is
+  reported beside its score, and it never runs as a gate on its own.
+- Loop detection also runs inline in the agent loop (§2): a detected loop ends the run with a typed
+  error rather than burning the step budget.
 - Recordings of real traffic may contain private data. A library cannot stop a file being committed,
   so the defaults are what it can control: the recording path defaults outside the working tree, files
   are written with owner-only permissions, and memory sections are excluded unless enabled (§4). Test
