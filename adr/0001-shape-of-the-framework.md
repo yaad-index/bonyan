@@ -139,7 +139,7 @@ through the program:
   default". **"Not cleared" is its own result value, distinct from an error**, so a caller that handles
   errors and verdicts separately cannot read a failure as a pass by forgetting a branch. Non-answers include a failed model or classifier call, structured output still invalid
   after retries (§6), a step or budget limit reached, cancellation or deadline, the fallback list
-  exhausted, and an approver who does not answer (the approval hook's timeout means cancel).
+  exhausted, a detected loop (§8), and an approver who does not answer (the approval hook's timeout means cancel).
 
 ### 8. Evaluation and replay
 
@@ -152,18 +152,24 @@ through the program:
   offline and, sampled, over live runs, and report as metrics (§9). The initial set:
   - **groundedness / hallucination:** claims in an answer checked against the material that was in
     context (sources, tool results, recalled memory); unsupported claims and invented citations are
-    counted;
+    counted. When the material is not in the recording (default recordings exclude memory, §4), a
+    claim that may rest on it is reported as **unverifiable**, not unsupported;
   - **loops:** repeated tool calls with the same arguments, repeated states, and runs that hit the
     step limit;
-  - **waste:** tokens and cost per completed task, redundant or failed calls, context sent but never
-    used, retries;
+  - **waste:** tokens and cost per completed task, redundant or failed calls, retries, and context
+    sent but never used (the last is an attribution judgement, so model-based);
   - **task outcome:** did the run reach a valid final answer, and does it meet the case's expected
     properties.
-- Some evaluators are deterministic (loops, waste); some need a model (groundedness). A model-based
+- Some evaluators are deterministic (loops, most of waste); some need a model (groundedness, unused
+  context). A model-based
   evaluator is itself a measurement with error, so its agreement with hand labels on a sample is
-  reported beside its score, and it never runs as a gate on its own.
-- Loop detection also runs inline in the agent loop (§2): a detected loop ends the run with a typed
-  error rather than burning the step budget.
+  reported beside its score, and it never runs as a gate on its own. A model-based evaluator is itself a model
+  call reading untrusted context and answers (an answer claiming "this is grounded" is an injection
+  aimed at the judge), so it runs inside the same invariants, with its own budget. **Sampled live
+  evaluation that sends user context to an evaluator model is opt-in and off by default.**
+- Loop detection also runs inline in the agent loop (§2), with a configurable threshold (polling a
+  tool repeats legitimately): a detected loop ends the run with a typed error rather than burning the
+  step budget, and for a gate-type agent it is one more "not cleared" case (§7).
 - Recordings of real traffic may contain private data. A library cannot stop a file being committed,
   so the defaults are what it can control: the recording path defaults outside the working tree, files
   are written with owner-only permissions, and memory sections are excluded unless enabled (§4). Test
