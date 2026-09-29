@@ -1,6 +1,6 @@
 # Implementation plan
 
-**Status:** proposed. This is a plan, not a decision record. It turns [ADR 0001](../adr/0001-shape-of-the-framework.md) into a sequence of pull requests, and says which existing libraries each part is built on. Nothing here is implemented yet.
+**Status:** proposed, for discussion. This is a plan, not a decision record, and it is kept open as the reference while the phases land rather than merged. It turns [ADR 0001](../adr/0001-shape-of-the-framework.md) into a sequence of pull requests, and says which existing libraries each part is built on. Nothing here is implemented yet.
 
 Library versions below were read from the Go module proxy on 2026-09-29. Re-check them when each phase starts, because pinning happens in that phase's PR, not here.
 
@@ -39,7 +39,7 @@ Pieces of those ecosystems that sit behind one of bonyan's interfaces, such as a
 
 | Slot (ADR section) | Decision | Module | Version checked | Notes |
 |---|---|---|---|---|
-| Chat-completions-compatible adapter (§1) | **write a thin client** on `net/http` | — | — | The wire subset needed (messages, tools, response schema, max output tokens, usage) is small. Recording (§8) and "missing usage is an error" (§11) both need the raw response anyway. Provider SDKs assessed read credentials and base URLs from environment variables by default (bypassing the secret resolver, §10) and retry internally where the loop can neither see nor record it. |
+| Chat-completions-compatible adapter (§1) | **write a thin client** on `net/http` | — | — | The wire subset needed (messages, tools, response schema, max output tokens, usage) is small. Recording (§8) and "missing usage is an error" (§11) both need the raw response anyway. The most widely used SDK for this wire format (checked at v3.66.0) reads the base URL and API key from environment variables by default, and retries twice by default. Both can be switched off by options, so neither is disqualifying on its own, but both would have to be switched off deliberately on every construction to keep credentials on the secret resolver (§10) and retries visible to the loop. |
 | Tool-server protocol client (§5) | **use**, behind the tool registry | `github.com/modelcontextprotocol/go-sdk` | v1.8.0 | v1 with a written compatibility promise; stdio and streamable HTTP transports. Already the house choice. |
 | JSON Schema from Go types, and validation of structured output (§5, §6) | **use**, pinned | `github.com/google/jsonschema-go` | v0.4.3 | Generates and validates (drafts 2020-12 and 07); the protocol client above already depends on it. Known gaps to test around: `format` is not enforced, `omitempty` fields are left out of `required`, slices generate as null-or-array. `github.com/santhosh-tekuri/jsonschema/v6` is the replacement validator if format checks become necessary. |
 | Tracing and metrics (§9) | **use** | `go.opentelemetry.io/otel` | v1.46.0 | Core packages import the API only; the SDK and exporters are wired by the program. |
@@ -82,7 +82,7 @@ Each phase is one pull request, unless it says otherwise. Every phase lands with
 *Done when:* `make check` passes locally and in CI, and a deliberately misformatted file fails `fmt-check`.
 
 ### Phase 1: stack-and-conventions ADR (maintainer approval required)
-`adr/0000` (why ADRs) and an ADR recording the stack: the conventions and deviations in §1, and the dependencies in §3 that are load-bearing for the public API, including the SQLite driver over bbolt. Docs only.
+`adr/0000` (why ADRs) and an ADR recording the stack: the conventions and deviations in §1, and the dependencies in §3 that are load-bearing for the public API, including the SQLite driver over bbolt. It also decides **where the heavier dependencies live**: the SQLite driver and the optional tokenizer are needed only by the packages that use them, but a dependency in the root `go.mod` is part of the module graph of every caller. The ADR decides between keeping them in the root module and giving `memory/sqlite` and `tokenize/tiktoken` their own nested modules, and records why. The same reasoning is what put the dev tools in `tools/go.mod` (§1). Docs only.
 
 ### Phase 2: core types
 `content`, `model` interfaces per kind, typed errors, the not-cleared result, and limit types where zero is invalid. No third-party dependencies.
@@ -141,12 +141,15 @@ Spans and metrics per loop step, model call and tool call, using the pinned GenA
 
 ### Phase 16: evaluation, deterministic
 The eval runner, cases, reports, and the deterministic evaluators (loops, most of waste, task outcome). Evaluators can be switched on or off per agent and per run.
+*Tests:* a case set produces per-case results and aggregates; a recorded run with a repeated identical tool call is reported as a loop; a disabled evaluator produces no score and switching it off leaves the step and budget limits in force.
 
 ### Phase 17: evaluation, model-based and asynchronous
 The groundedness and unused-context evaluators under the invariants, with their own budget, and agreement with hand labels reported beside the score. "Unverifiable" when the material is not in the recording. The opt-in asynchronous hand-off, where a queued item is a recording.
+*Tests:* a claim resting on memory absent from the recording is reported unverifiable, not unsupported; an evaluator call is charged to its own budget, not the evaluated run's; an answer containing an instruction aimed at the judge stays inside the untrusted section; live evaluation is off unless enabled; delete by subject removes queued items.
 
 ### Phase 18: re-runs
 Repeated and parameter-grid re-runs of a recorded input. Tools are answered from the recording by default, and the grid is limited to configured models.
+*Tests:* a re-run executes no live tool unless that tool is opted in; a tool call with no recorded match fails that cell instead of executing; an action needing approval is not auto-approved; a grid naming an unconfigured model is refused unless the operator names it explicitly.
 
 ## 6. Order and parallelism
 
