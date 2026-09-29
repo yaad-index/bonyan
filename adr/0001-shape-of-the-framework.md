@@ -142,19 +142,21 @@ is applied is not a slot.
   untrusted, marks it with a delimited, labelled section, and adds no further handling. A program
   that configures no policy gets exactly this.
 
-**Where the line between policy and mechanism sits, and what moving it costs.** Proposed:
-classification, marking format and handling are pluggable, and three things are fixed: the enforcement point cannot be
-bypassed; once content is classified untrusted nothing converts it to trusted; and untrusted content
-is always delimited and never placed in an instruction position. The fixed part is the mechanism that
-makes any policy mean something; everything that decides *what* is protected is pluggable. The
-line could sit elsewhere; each position has a cost, and the maintainer's approval of this ADR
-decides which one it takes:
+**Where the line between policy and mechanism sits, and what moving it costs.** Classification,
+marking format and handling are pluggable, and three things are fixed: the enforcement point cannot
+be bypassed; once content is classified untrusted nothing converts it to trusted; and untrusted
+content is always delimited and never placed in an instruction position. The fixed part is the
+mechanism that makes any policy mean something; everything that decides *what* is protected is
+pluggable.
 
-- **Proposed: classification is fully pluggable, including declaring a source trusted** (for
+- **Decided: classification is fully pluggable, including declaring a source trusted** (for
   example the output of a program's own internal tool). This is what makes the policy decide what
   counts as untrusted. The cost: a policy that classifies outside material as trusted removes the
   protection for it, and bonyan cannot tell a correct decision of that kind from a wrong one. What
-  bonyan can do is record every decision, so the choice is visible in traces and recordings.
+  bonyan does is record every decision, so the choice is visible in traces and recordings.
+
+Two other positions were considered and rejected:
+
 - **Narrower: a floor.** A policy could add sources to "untrusted" but never declare material from
   outside the program trusted. This is safer against a mistaken policy, but a policy could then
   only tighten, so what counts as untrusted would no longer be fully the policy's decision.
