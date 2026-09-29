@@ -31,6 +31,14 @@ implementation for each slot, so swapping one (another model provider, another m
 another secret store) is a configuration change, not a code change. Each slot ships at least one
 in-repo implementation, and a program can register its own under a new name without forking bonyan.
 
+**Where pluggability stops: the invariants.** The guarantees in this ADR are applied by bonyan
+*around* the slots, never by an implementation inside one, so no configuration and no registered
+implementation can switch them off. They are: the untrusted-content type (trusted text cannot be
+constructed from it outside bonyan, §3), re-marking of recalled facts by source (§4), secret scoping
+and scrubbing (§10), exclusion of memory before anything reaches an exporter or recorder (§4, §9),
+the distinct not-cleared result (§7), and the loop's limits (§2, §11). A custom pipeline stage,
+exporter or recorder receives only what has already passed through them.
+
 ### 1. Model: one interface for different kinds of model
 
 - A `Model` takes a request (messages, tool definitions, an optional output schema, limits) and
