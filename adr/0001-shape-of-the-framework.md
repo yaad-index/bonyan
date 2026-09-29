@@ -174,7 +174,10 @@ through the program:
   evaluation adds no latency to the agent. Scores are attached to the run's identifier (and its trace)
   and exported as metrics, so a number per evaluator arrives later and can be read per run, per agent
   and over time. The hand-off goes through a pluggable queue, so where evaluation runs is a
-  configuration choice.
+  configuration choice. **A queued item is a recording** (same format and rules as above:
+  memory excluded unless full recordings are enabled, indexed by subject, retention applies, deletion
+  by subject removes queued items), and the queue is a slot under the invariants, so an evaluator
+  reads it exactly like an offline recording and the "unverifiable" rule carries over.
 - Loop detection also runs inline in the agent loop (§2), with a configurable threshold (polling a
   tool repeats legitimately): a detected loop ends the run with a typed error rather than burning the
   step budget, and for a gate-type agent it is one more "not cleared" case (§7).
