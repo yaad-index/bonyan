@@ -169,6 +169,12 @@ through the program:
   call reading untrusted context and answers (an answer claiming "this is grounded" is an injection
   aimed at the judge), so it runs inside the same invariants, with its own budget. **Sampled live
   evaluation that sends user context to an evaluator model is opt-in and off by default.**
+- **Live evaluation is asynchronous.** An operator defines evaluators once; when live evaluation is
+  enabled for an agent, each sampled run is handed off after it finishes, never inside it, so
+  evaluation adds no latency to the agent. Scores are attached to the run's identifier (and its trace)
+  and exported as metrics, so a number per evaluator arrives later and can be read per run, per agent
+  and over time. The hand-off goes through a pluggable queue, so where evaluation runs is a
+  configuration choice.
 - Loop detection also runs inline in the agent loop (§2), with a configurable threshold (polling a
   tool repeats legitimately): a detected loop ends the run with a typed error rather than burning the
   step budget, and for a gate-type agent it is one more "not cleared" case (§7).
