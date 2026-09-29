@@ -31,8 +31,8 @@ the network sits behind an interface with at least one in-repo implementation.
 - **Kinds are first-class, not squeezed into chat:** chat/completion models, embedding models, and
   **classifiers** (text in, labels with confidences out, no prompt). A classifier is not given a chat
   interface it cannot honour.
-- Providers are adapters behind the interface: an OpenAI-compatible HTTP adapter (which also covers
-  most local servers), plus others as needed. No provider is a dependency of the core packages.
+- Providers are adapters behind the interface: a chat-completions-compatible HTTP adapter (which
+  also covers most local servers), plus others as needed. No provider is a dependency of the core packages.
 - Routing and fallback are explicit configuration: a primary model, an ordered fallback list, and
   per-call timeouts. A failed call returns a typed error; it is never silently answered by a
   different model without that being recorded.
@@ -41,8 +41,8 @@ the network sits behind an interface with at least one in-repo implementation.
 
 - One loop: assemble context → call the model → if the model requests tools, run them and feed
   results back → stop on a final answer, a step limit, a budget limit, or a cancelled context.
-- Step limits, budget limits and cancellation are mandatory parameters with defaults, never optional
-  behaviours a program can forget to add.
+- Step limits, budget limits and a deadline always apply. Each has a default; zero or negative is
+  invalid, never "unlimited", so a limit cannot be switched off by omission.
 - The loop is a plain function over interfaces, so it runs identically in a test with a recorded
   model (§8) and in production.
 
@@ -60,9 +60,11 @@ through the program:
 - **A token budget is allocated per section**, and trimming is deterministic and recorded, so it is
   always possible to say what was dropped from a call and why.
 - **Fetched content is data, never instructions (§7).** Anything that did not come from the program
-  or the operator (mail, web pages, feed items, user uploads, tool output) enters context only
-  through a wrapper that marks it as untrusted material. The pipeline, not each program, owns that
-  boundary.
+  or the operator (mail, web pages, feed items, user uploads, tool output) is a **distinct type** that
+  the instruction builder does not accept, so it can only enter context inside a delimited,
+  marked section. The mechanism is structural: the pipeline, not each program, owns the boundary.
+  **What this guarantees is placement, not behaviour:** a model may still act on instructions inside
+  marked data, which is why §7's approval hook and fail-closed mode exist.
 
 ### 4. Memory: part of the framework, pluggable
 
@@ -76,17 +78,29 @@ through the program:
   also keeps bonyan's licence independent of the backend's.
 - Long-term extraction may run asynchronously, and the interface says so: a fact from this turn is
   not promised to be recallable on the next one.
+- **Recall re-applies trust by source.** Every record carries its source. A fact extracted from
+  untrusted material is recalled as untrusted (§3) and enters context inside the marked section, not
+  as trusted memory. This is a rule of the memory interface, not left to each backend, so a fact
+  planted by a fetched item cannot come back later as trusted context.
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
-  and its source; deletion by subject is required of every backend; a retention period is
-  configurable; and memory contents never appear in logs or traces (§9).
+  and its source; a retention period is configurable; deletion by subject is **required to
+  implement** for every backend (bonyan can require and call it; for an external backend it cannot
+  verify the deletion happened).
+- **Memory in logs, traces and recordings:** by default memory contents never appear in logs or
+  traces (§9), and recordings (§8) exclude recalled-memory sections. If an operator enables content
+  capture or full recordings, those copies fall under the same subject, retention and deletion rules,
+  and deletion by subject reaches them.
 
 ### 5. Tools
 
 - A tool registry with typed inputs and outputs (JSON Schema derived from Go types).
 - An **MCP client**, so tools served over the Model Context Protocol are registered the same way as
   in-process tools.
-- Each tool declares what it may touch (network, secrets by name, filesystem), and the loop refuses a
-  call outside that declaration.
+- Each tool declares what it may touch: secrets by name, network, filesystem. **Only secrets are
+  enforced**, because bonyan is what resolves them (§10). Network and filesystem declarations are
+  metadata for review and approval, not a sandbox: in-process Go code can open a socket or a file
+  without asking, and a remote tool server reports its own capabilities. Real isolation needs a
+  separate process, and that is the program's choice.
 
 ### 6. Structured output
 
@@ -99,8 +113,10 @@ through the program:
 - Untrusted material (§3) is marked, delimited and never concatenated into instruction positions.
 - A **human-in-the-loop hook**: an agent can mark an action as needing approval; the loop suspends
   it, emits it to a configured approver, and resumes or cancels on the decision.
-- **Fail-closed mode** for gate-type agents: when a model or classifier call fails, the result is
-  "not cleared", never "cleared by default".
+- **Fail-closed mode** for gate-type agents: every non-answer is "not cleared", never "cleared by
+  default". Non-answers include a failed model or classifier call, structured output still invalid
+  after retries (§6), a step or budget limit reached, cancellation or deadline, the fallback list
+  exhausted, and an approver who does not answer (the approval hook's timeout means cancel).
 
 ### 8. Evaluation and replay
 
@@ -109,8 +125,10 @@ through the program:
 - An **eval runner** scores an agent against a set of cases (inputs plus expected properties) and
   reports per-case results and aggregates. A prompt, model or threshold change is meant to be judged
   by this report before it ships.
-- Recordings of real traffic may contain private data; the tooling defaults to keeping them local
-  and never committed, and test fixtures in the repo are synthetic.
+- Recordings of real traffic may contain private data. A library cannot stop a file being committed,
+  so the defaults are what it can control: the recording path defaults outside the working tree, files
+  are written with owner-only permissions, and memory sections are excluded unless enabled (§4). Test
+  fixtures in the repo are synthetic.
 
 ### 9. Observability
 
@@ -128,23 +146,31 @@ through the program:
 - **Secrets:**
   - resolved from pluggable sources (environment, files, and external secret stores through
     adapters);
-  - **resolved by tools at call time, never placed in model context, memory, logs or traces**;
-  - scoped: an agent's configuration names which secrets each tool may use, and nothing else is
-    readable by it;
+  - resolved by tools at call time and never placed into context by bonyan itself;
+  - **scoped on bonyan's resolver:** an agent's configuration names which secrets each tool may
+    resolve, and the resolver refuses others. In-process code can still read the environment
+    directly; the scoping covers what goes through bonyan, not the process;
+  - **scrubbed:** every value resolved through bonyan is removed, by exact match, from tool output
+    before it enters context, and from logs, traces and recordings. Exact match is the limit: an
+    encoded or partial secret passes the scrubber;
   - re-readable without a restart, so rotation does not need a redeploy.
 
 ### 11. Budget and cost
 
-- Every run has a token and cost ceiling (from configuration, with a default). Crossing it ends the
-  run with a typed error, recorded in the trace.
+- Every run has a token and cost ceiling (from configuration, with a default). Usage is known only
+  after a call returns, so before each call the loop checks the worst case (remaining budget against
+  max output tokens × price) and refuses a call that could cross the ceiling; crossing it ends the run
+  with a typed error, recorded in the trace.
+- **Missing usage is an error in a budgeted run**, never counted as zero: some local servers report
+  none, and treating that as zero would leave the budget silently unenforced.
 - Cost is computed from provider usage and a price table in configuration, never estimated after the
   fact.
 
 ## Consequences
 
 - Programs built on bonyan stop owning these concerns and gain them together; the cost is a shared
-  dependency whose interfaces must stay stable, so interface changes follow semantic versioning and
-  get their own ADR.
+  dependency whose interfaces must stay stable, so interface changes follow semantic versioning (before 1.0 a breaking change bumps the minor
+  version, per the release config) and get their own ADR.
 - The first releases will ship interfaces and the basic implementations before any program migrates.
   Each migration is its own piece of work in that program's repository.
 - The library stays generic: no instance's topics, names, providers or thresholds appear in code,
