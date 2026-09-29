@@ -1,6 +1,6 @@
 # ADR 0001: The shape of bonyan, a library for building agents
 
-**Status:** Proposed
+**Status:** Accepted (maintainer sign-off recorded by approval of the PR that sets this status)
 
 ## Context
 
