@@ -149,7 +149,9 @@ through the program:
   reports per-case results and aggregates. A prompt, model or threshold change is meant to be judged
   by this report before it ships.
 - **Evaluators judge behaviour, not just record it.** Pluggable evaluators run over recordings
-  offline and, sampled, over live runs, and report as metrics (§9). The initial set:
+  offline and, sampled, over live runs, and report as metrics (§9). **Every evaluator, inline loop detection
+  included, is switched on or off by the caller**, per agent or per run; switching one off never
+  switches off the step and budget limits, which are invariants. The initial set:
   - **groundedness / hallucination:** claims in an answer checked against the material that was in
     context (sources, tool results, recalled memory); unsupported claims and invented citations are
     counted. When the material is not in the recording (default recordings exclude memory, §4), a
