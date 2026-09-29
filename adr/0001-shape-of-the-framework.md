@@ -85,12 +85,14 @@ through the program:
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
   and its source; a retention period is configurable; deletion by subject is **required to
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
-  verify the deletion happened). What verifies it is a **conformance test suite** in bonyan that every
-  backend must pass (write, recall, delete by subject, assert absent, including extracted facts).
+  verify the deletion happened). A **conformance test suite** in bonyan that every backend must pass (write,
+  recall, delete by subject, assert absent, including extracted facts) proves a backend *implements*
+  deletion; it does not prove that a given deletion on a live external store happened.
 - **Memory in logs, traces and recordings:** by default memory contents never appear in bonyan's own
-  logs or traces (§9; a program's own logging is outside bonyan's reach), and recordings (§8) exclude recalled-memory sections. If an operator enables content
-  capture or full recordings, those copies fall under the same subject, retention and deletion rules,
-  and deletion by subject reaches them.
+  logs or traces (§9; a program's own logging is outside bonyan's reach), and recordings (§8) exclude recalled-memory sections. **Trace content capture (§9) always
+  excludes memory sections**, because exported spans leave for a trace backend bonyan cannot delete
+  from. If an operator enables full recordings, they are local files **indexed by subject**, under the
+  same retention rules, and deletion by subject removes them.
 
 ### 5. Tools
 
@@ -115,7 +117,8 @@ through the program:
 - A **human-in-the-loop hook**: an agent can mark an action as needing approval; the loop suspends
   it, emits it to a configured approver, and resumes or cancels on the decision. Suspended actions are
   kept in a pluggable store so they survive a restart; with no durable store configured, a restart
-  cancels every pending action (fail-closed), it never drops one silently.
+  cancels every pending action (fail-closed), it never drops one silently. An approval that arrives for an action
+  the loop no longer holds (cancelled by a restart or a timeout) is rejected as unknown, never applied.
 - **Fail-closed mode** for gate-type agents: every non-answer is "not cleared", never "cleared by
   default". **"Not cleared" is its own result value, distinct from an error**, so a caller that handles
   errors and verdicts separately cannot read a failure as a pass by forgetting a branch. Non-answers include a failed model or classifier call, structured output still invalid
@@ -162,13 +165,19 @@ through the program:
 ### 11. Budget and cost
 
 - Every run has a token and cost ceiling (from configuration, with a default). Usage is known only
-  after a call returns, so before each call the loop checks the worst case (remaining budget against
-  max output tokens × price) and refuses a call that could cross the ceiling; crossing it ends the run
-  with a typed error, recorded in the trace.
+  after a call returns, so two mechanisms combine:
+  - **a pre-call bound:** every call in a budgeted run must carry a max-output-tokens cap (required,
+    not optional). The loop counts the input with the model adapter's tokenizer, or a conservative
+    per-character upper bound when the adapter has none, and refuses a call whose bound (input +
+    max output) × price would cross the remaining budget. This is a bound, not a charge.
+  - **charging from reported usage:** what is spent is taken from the provider's reported usage after
+    the call, never estimated. Crossing the ceiling ends the run with a typed error, recorded in the
+    trace.
 - **Missing usage is an error in a budgeted run**, never counted as zero: some local servers report
   none, and treating that as zero would leave the budget silently unenforced.
-- Cost is computed from provider usage and a price table in configuration, never estimated after the
-  fact.
+- Cost charged to a run is computed from reported provider usage and a price table in
+  configuration. The pre-call bound above is the only estimate, and it only ever refuses calls; it
+  never stands in for a charge.
 
 ## Consequences
 
