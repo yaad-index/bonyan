@@ -1,6 +1,6 @@
 # ADR 0002: Stack, conventions and dependencies
 
-**Status:** Proposed
+**Status:** Accepted (maintainer sign-off recorded by approval of the PR that sets this status)
 
 ## Context
 
