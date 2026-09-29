@@ -85,9 +85,10 @@ through the program:
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
   and its source; a retention period is configurable; deletion by subject is **required to
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
-  verify the deletion happened).
-- **Memory in logs, traces and recordings:** by default memory contents never appear in logs or
-  traces (§9), and recordings (§8) exclude recalled-memory sections. If an operator enables content
+  verify the deletion happened). What verifies it is a **conformance test suite** in bonyan that every
+  backend must pass (write, recall, delete by subject, assert absent, including extracted facts).
+- **Memory in logs, traces and recordings:** by default memory contents never appear in bonyan's own
+  logs or traces (§9; a program's own logging is outside bonyan's reach), and recordings (§8) exclude recalled-memory sections. If an operator enables content
   capture or full recordings, those copies fall under the same subject, retention and deletion rules,
   and deletion by subject reaches them.
 
@@ -112,9 +113,12 @@ through the program:
 
 - Untrusted material (§3) is marked, delimited and never concatenated into instruction positions.
 - A **human-in-the-loop hook**: an agent can mark an action as needing approval; the loop suspends
-  it, emits it to a configured approver, and resumes or cancels on the decision.
+  it, emits it to a configured approver, and resumes or cancels on the decision. Suspended actions are
+  kept in a pluggable store so they survive a restart; with no durable store configured, a restart
+  cancels every pending action (fail-closed), it never drops one silently.
 - **Fail-closed mode** for gate-type agents: every non-answer is "not cleared", never "cleared by
-  default". Non-answers include a failed model or classifier call, structured output still invalid
+  default". **"Not cleared" is its own result value, distinct from an error**, so a caller that handles
+  errors and verdicts separately cannot read a failure as a pass by forgetting a branch. Non-answers include a failed model or classifier call, structured output still invalid
   after retries (§6), a step or budget limit reached, cancellation or deadline, the fallback list
   exhausted, and an approver who does not answer (the approval hook's timeout means cancel).
 
@@ -147,8 +151,8 @@ through the program:
   - resolved from pluggable sources (environment, files, and external secret stores through
     adapters);
   - resolved by tools at call time and never placed into context by bonyan itself;
-  - **scoped on bonyan's resolver:** an agent's configuration names which secrets each tool may
-    resolve, and the resolver refuses others. In-process code can still read the environment
+  - **scoped by capability on bonyan's resolver:** each tool is handed a resolver that can only reach
+    the names its configuration grants, and it has no other path to secrets through bonyan. In-process code can still read the environment
     directly; the scoping covers what goes through bonyan, not the process;
   - **scrubbed:** every value resolved through bonyan is removed, by exact match, from tool output
     before it enters context, and from logs, traces and recordings. Exact match is the limit: an
