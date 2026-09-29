@@ -57,3 +57,12 @@ func TestNoConversionFromUntrustedToTrusted(t *testing.T) {
 		}
 	}
 }
+
+// Recalled memory reports both that it is memory and what it was extracted
+// from.
+func TestMemoryKeepsTheKindItCameFrom(t *testing.T) {
+	p := content.Provenance{Kind: content.KindMemory, Origin: content.KindFetched, ID: "fact-9"}
+	u := content.From(p, "the reader prefers morning delivery")
+	assert.Equal(t, content.KindMemory, u.Provenance().Kind)
+	assert.Equal(t, content.KindFetched, u.Provenance().Origin)
+}

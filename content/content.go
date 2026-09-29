@@ -44,8 +44,9 @@ func (Trusted) sealed() {}
 // Kind classifies where untrusted text came from.
 type Kind string
 
-// The kinds of untrusted source. Memory is kept separate from the kind of the
-// material a fact was extracted from, so that recall can say both.
+// The kinds of untrusted source. For recalled memory, Provenance.Origin keeps
+// the kind of the material the fact was extracted from, so recall can report
+// both that it is memory and what it originally was.
 const (
 	KindFetched Kind = "fetched" // retrieved from outside: mail, web, feeds
 	KindUser    Kind = "user"    // supplied by an end user or an upload
@@ -56,6 +57,10 @@ const (
 // Provenance records where untrusted text came from.
 type Provenance struct {
 	Kind Kind
+	// Origin is set when Kind is KindMemory: the kind of the untrusted material
+	// the recalled fact was extracted from (fetched, user or tool). It is empty
+	// for every other kind.
+	Origin Kind
 	// ID identifies the specific source (a message id, a URL, a tool call id).
 	// It is for tracing and audit, never for trust decisions.
 	ID string
