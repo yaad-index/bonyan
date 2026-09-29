@@ -1,11 +1,12 @@
 # Weekly dependency updates. Two ecosystems:
 #
-#   - gomod: Go module dependencies (go.mod / go.sum at the repo root).
+#   - gomod: Go module dependencies (go.mod / go.sum at the repo root, and the
+#     dev tools in tools/go.mod).
 #   - github-actions: the actions pinned by SHA in .github/workflows/.
-#     Bumps here are how the SHA-pinned actions (and the pinned
-#     golangci-lint version) get updated deliberately.
+#     Bumps here are how the SHA-pinned actions get updated deliberately.
 #
-# No initial ignore rules — keep updates aggressive until they prove noisy.
+# Minor and patch updates are grouped into one PR per ecosystem; majors arrive
+# individually. No ignore rules.
 # Dependabot PRs go through the same gate as any other: CI green + review.
 
 version: 2
@@ -14,8 +15,26 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # The dev tools (formatters, linter), tracked in their own module.
+  - package-ecosystem: gomod
+    directory: "/tools"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
