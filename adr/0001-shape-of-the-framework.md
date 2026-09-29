@@ -167,8 +167,9 @@ through the program:
 - Every run has a token and cost ceiling (from configuration, with a default). Usage is known only
   after a call returns, so two mechanisms combine:
   - **a pre-call bound:** every call in a budgeted run must carry a max-output-tokens cap (required,
-    not optional). The loop counts the input with the model adapter's tokenizer, or a conservative
-    per-character upper bound when the adapter has none, and refuses a call whose bound (input +
+    not optional). The loop counts the input with the model adapter's tokenizer, or, when the adapter has
+    none, a safe upper bound of one token per UTF-8 byte plus a fixed per-message allowance for
+    chat-template framing (per-character bounds undercount non-ASCII text), and refuses a call whose bound (input +
     max output) × price would cross the remaining budget. This is a bound, not a charge.
   - **charging from reported usage:** what is spent is taken from the provider's reported usage after
     the call, never estimated. Crossing the ceiling ends the run with a typed error, recorded in the
