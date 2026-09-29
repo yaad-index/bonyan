@@ -148,6 +148,11 @@ through the program:
 - An **eval runner** scores an agent against a set of cases (inputs plus expected properties) and
   reports per-case results and aggregates. A prompt, model or threshold change is meant to be judged
   by this report before it ships.
+- **Re-runs for debugging and comparison.** A recorded input can be run again against live models,
+  either N times unchanged (to see how much the output varies) or across a grid of parameters (model,
+  prompt version, temperature, context settings). The results go through the same evaluators and
+  land in one report, so a flaky answer or a regression can be investigated after the fact rather
+  than reproduced by hand. Re-runs spend real budget and follow the same recording rules.
 - **Evaluators judge behaviour, not just record it.** Pluggable evaluators run over recordings
   offline and, sampled, over live runs, and report as metrics (§9). **Every evaluator, inline loop detection
   included, is switched on or off by the caller**, per agent or per run; switching one off never
