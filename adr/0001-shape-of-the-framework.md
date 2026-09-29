@@ -153,6 +153,11 @@ through the program:
   prompt version, temperature, context settings). The results go through the same evaluators and
   land in one report, so a flaky answer or a regression can be investigated after the fact rather
   than reproduced by hand. Re-runs spend real budget and follow the same recording rules.
+  **A re-run never repeats side effects by default:** tool calls are answered from the recording,
+  matched by call, and an unmatched call fails that run rather than executing; live execution is an
+  explicit per-tool opt-in, and an action that needs approval is never auto-approved in a re-run.
+  **A model grid only uses models already configured for the agent** unless the operator names others
+  explicitly, because each grid model receives the recorded, possibly private, input.
 - **Evaluators judge behaviour, not just record it.** Pluggable evaluators run over recordings
   offline and, sampled, over live runs, and report as metrics (§9). **Every evaluator, inline loop detection
   included, is switched on or off by the caller**, per agent or per run; switching one off never
