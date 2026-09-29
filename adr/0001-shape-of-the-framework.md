@@ -142,14 +142,15 @@ is applied is not a slot.
   untrusted, marks it with a delimited, labelled section, and adds no further handling. A program
   that configures no policy gets exactly this.
 
-**Where the line between policy and mechanism sits, and what moving it costs.** Classification,
-marking format and handling are pluggable. Three things are fixed: the enforcement point cannot be
+**Where the line between policy and mechanism sits, and what moving it costs.** Proposed:
+classification, marking format and handling are pluggable, and three things are fixed: the enforcement point cannot be
 bypassed; once content is classified untrusted nothing converts it to trusted; and untrusted content
 is always delimited and never placed in an instruction position. The fixed part is the mechanism that
 makes any policy mean something; everything that decides *what* is protected is pluggable. The
-line could sit elsewhere, and each position has a cost:
+line could sit elsewhere; each position has a cost, and the maintainer's approval of this ADR
+decides which one it takes:
 
-- **As decided, classification is fully pluggable, including declaring a source trusted** (for
+- **Proposed: classification is fully pluggable, including declaring a source trusted** (for
   example the output of a program's own internal tool). This is what makes the policy decide what
   counts as untrusted. The cost: a policy that classifies outside material as trusted removes the
   protection for it, and bonyan cannot tell a correct decision of that kind from a wrong one. What
