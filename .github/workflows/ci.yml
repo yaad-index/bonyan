@@ -25,27 +25,12 @@ jobs:
           # Track the version pinned in go.mod so CI and the module stay in
           # lockstep.
           go-version-file: go.mod
+          # Key the module and build cache on the tools module: building the
+          # linter dominates the time a cold run takes.
+          cache-dependency-path: tools/go.sum
 
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "These files are not gofmt-formatted:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          # Pinned so CI matches the local run.
-          version: v2.11.4
-
-      - name: Test
-        run: go test -race ./...
+      - name: Check
+        # The same target a contributor runs: vet, build, race tests, formatting
+        # (gofumpt, goimports), lint and tidiness of both modules. The tools are
+        # built from tools/go.mod, so nothing is installed separately.
+        run: make check
