@@ -35,7 +35,8 @@ in-repo implementation, and a program can register its own under a new name with
 *around* the slots, never by an implementation inside one, so no configuration and no registered
 implementation can switch them off. They are: the untrusted-content type (trusted text cannot be
 constructed from it outside bonyan, §3), re-marking of recalled facts by source (§4), secret scoping
-and scrubbing (§10), exclusion of memory before anything reaches an exporter or recorder (§4, §9),
+and scrubbing (§10), exclusion of memory before anything reaches an exporter or recorder, except operator-enabled full
+recordings (§4, §9),
 the distinct not-cleared result (§7), and the loop's limits (§2, §11). A custom pipeline stage,
 exporter or recorder receives only what has already passed through them.
 
