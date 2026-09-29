@@ -21,8 +21,15 @@ it describes *what its agent does* and inherits *how an agent runs*.
 ## Decision
 
 bonyan is organised as small packages with one interface each. A program uses what it needs; no
-package requires another beyond what is stated here. Everything that touches a vendor, a store or
-the network sits behind an interface with at least one in-repo implementation.
+package requires another beyond what is stated here.
+
+**Everything is pluggable and switchable by configuration.** Not only what touches a vendor, a store
+or the network: models, memory backends, context-pipeline stages, tools, secret sources, the approval
+store, recorders, eval scorers and telemetry exporters each sit behind an interface, and every
+implementation registers under a name. An agent is assembled from configuration that names the
+implementation for each slot, so swapping one (another model provider, another memory backend,
+another secret store) is a configuration change, not a code change. Each slot ships at least one
+in-repo implementation, and a program can register its own under a new name without forking bonyan.
 
 ### 1. Model: one interface for different kinds of model
 
