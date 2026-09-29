@@ -181,6 +181,11 @@ through the program:
 
 - OpenTelemetry built in: a span per loop step, model call and tool call, with model, tokens,
   latency and cost as attributes; metrics for the same.
+- **Names follow the OpenTelemetry semantic conventions, not our own:** the GenAI conventions
+  (`gen_ai.*`: operation, request model, token usage, duration) for model, agent and tool spans and
+  metrics, the general conventions for everything else. The same conventions are what managed agent
+  platforms and observability backends emit and read, so bonyan's telemetry is portable and nothing is
+  renamed later. Anything the conventions do not cover gets a `bonyan.*` name, documented in one place.
 - **Redaction at the boundary:** span attributes carry sizes and identifiers, not message content,
   memory contents or secrets. Content capture is an explicit, off-by-default option.
 
