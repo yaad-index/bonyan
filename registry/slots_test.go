@@ -218,14 +218,14 @@ func TestHookConfigurationErrors(t *testing.T) {
 	_, err := r.Assemble(registry.Config{
 		Chat:  registry.SlotConfig{Impl: "basic"},
 		Hooks: map[hook.Point][]registry.SlotConfig{"after_everything": {{Impl: "h"}}},
-	})
+	}, registry.WithRecorder(&events{}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown hook point "after_everything"`)
 
 	_, err = r.Assemble(registry.Config{
 		Chat:  registry.SlotConfig{Impl: "basic"},
 		Hooks: map[hook.Point][]registry.SlotConfig{hook.Reply: {{Impl: "missing"}}},
-	})
+	}, registry.WithRecorder(&events{}))
 	require.ErrorIs(t, err, registry.ErrUnknown)
 	assert.Contains(t, err.Error(), `hook "missing" (registered: [h])`)
 }
@@ -234,7 +234,7 @@ func TestUnknownPolicyFailsAssembly(t *testing.T) {
 	_, err := newRegistry(t).Assemble(registry.Config{
 		Chat:  registry.SlotConfig{Impl: "basic"},
 		Trust: &registry.SlotConfig{Impl: "missing"},
-	})
+	}, registry.WithRecorder(&events{}))
 	require.ErrorIs(t, err, registry.ErrUnknown)
 	assert.Contains(t, err.Error(), `trust "missing" (registered: [default])`)
 }
@@ -268,4 +268,31 @@ func TestPolicyIsNotAskedAfterTheDeadline(t *testing.T) {
 	assert.Equal(t, trust.Untrusted, d.Verdict)
 	assert.False(t, asked)
 	assert.Equal(t, registry.FailDeadline, rec.list()[0].Failure)
+}
+
+// Decisions that may declare a source trusted, and hook failures, are recorded
+// (ADR 0001 §3, §12), so configuring either without a recorder fails assembly.
+func TestRecorderRequiredWhereRecordingIsLoadBearing(t *testing.T) {
+	r := newRegistry(t)
+	require.NoError(t, r.RegisterPolicy("program", func(json.RawMessage) (trust.Policy, error) { return trust.Default{}, nil }))
+	require.NoError(t, r.RegisterHook("h", func(json.RawMessage) (hook.Hook, error) {
+		return hookFunc(func(context.Context, hook.Event) error { return nil }), nil
+	}))
+	chat := registry.SlotConfig{Impl: "basic"}
+
+	_, err := r.Assemble(registry.Config{Chat: chat, Trust: &registry.SlotConfig{Impl: "program"}})
+	require.ErrorIs(t, err, registry.ErrNoRecorder)
+	assert.Contains(t, err.Error(), `trust policy "program"`)
+
+	_, err = r.Assemble(registry.Config{Chat: chat, Hooks: map[hook.Point][]registry.SlotConfig{hook.Reply: {{Impl: "h"}}}})
+	require.ErrorIs(t, err, registry.ErrNoRecorder)
+
+	_, err = r.Assemble(registry.Config{Chat: chat, Trust: &registry.SlotConfig{Impl: "program"}}, registry.WithRecorder(nil))
+	require.ErrorIs(t, err, registry.ErrNoRecorder, "a nil recorder counts as none")
+
+	// The default policy never declares a source trusted, so it needs none.
+	_, err = r.Assemble(registry.Config{Chat: chat})
+	require.NoError(t, err)
+	_, err = r.Assemble(registry.Config{Chat: chat, Trust: &registry.SlotConfig{Impl: trust.DefaultName}})
+	require.NoError(t, err)
 }

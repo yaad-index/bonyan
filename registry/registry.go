@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -43,6 +44,12 @@ var ErrDuplicate = errors.New("registry: name already registered")
 // ErrUnknown reports configuration naming an implementation that is not
 // registered.
 var ErrUnknown = errors.New("registry: unknown implementation")
+
+// ErrNoRecorder reports configuration whose parts must be recorded, assembled
+// without a recorder: a trust policy other than the default, whose decisions
+// may declare sources trusted, or hooks, whose failures are recorded instead of
+// changing the run.
+var ErrNoRecorder = errors.New("registry: a recorder is required")
 
 // slot holds the named factories for one kind of part.
 type slot[T any] struct {
@@ -89,7 +96,24 @@ func (s *slot[T]) build(cfg SlotConfig) (T, error) {
 	if err != nil {
 		return zero, fmt.Errorf("registry: build %s %q: %w", s.name, cfg.Impl, err)
 	}
+	if isNil(impl) {
+		return zero, fmt.Errorf("registry: build %s %q: factory returned no implementation", s.name, cfg.Impl)
+	}
 	return impl, nil
+}
+
+// isNil reports whether v is nil or holds a nil pointer, func, map, channel or
+// slice, none of which a wrapper can call.
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Func, reflect.Map, reflect.Chan, reflect.Slice, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // Registry holds the named implementations of every slot.
@@ -202,9 +226,18 @@ func (h *Hooks) Run(ctx context.Context, ev hook.Event) {
 
 // Assemble builds every configured part and wraps it.
 func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
-	a := assembly{rec: discard{}}
+	var a assembly
 	for _, o := range opts {
 		o(&a)
+	}
+	if a.rec == nil {
+		if cfg.Trust != nil && cfg.Trust.Impl != trust.DefaultName {
+			return Components{}, fmt.Errorf("%w: trust policy %q", ErrNoRecorder, cfg.Trust.Impl)
+		}
+		if len(cfg.Hooks) > 0 {
+			return Components{}, fmt.Errorf("%w: hooks are configured", ErrNoRecorder)
+		}
+		a.rec = discard{}
 	}
 
 	r.mu.RLock()

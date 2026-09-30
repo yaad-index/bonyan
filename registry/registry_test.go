@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -177,4 +178,32 @@ func TestNamesAreSorted(t *testing.T) {
 	assert.Equal(t, []string{"a", "b", "c"}, r.Names(registry.SlotChat))
 	assert.Empty(t, r.Names(registry.SlotEmbedder))
 	assert.Nil(t, r.Names("no-such-slot"))
+}
+
+func TestFactoryReturningNoImplementationFails(t *testing.T) {
+	r := newRegistry(t)
+	require.NoError(t, r.RegisterChat("nil", func(json.RawMessage) (model.Chat, error) { return nil, nil }))
+	require.NoError(t, r.RegisterChat("nil-pointer", func(json.RawMessage) (model.Chat, error) {
+		var c *fakeChatPtr
+		return c, nil
+	}))
+	require.NoError(t, r.RegisterClassifier("nil", func(json.RawMessage) (model.Classifier, error) { return nil, nil }))
+
+	for _, name := range []string{"nil", "nil-pointer"} {
+		_, err := r.Assemble(registry.Config{Chat: registry.SlotConfig{Impl: name}})
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), fmt.Sprintf(`chat %q: factory returned no implementation`, name))
+	}
+	_, err := r.Assemble(registry.Config{
+		Chat:       registry.SlotConfig{Impl: "basic"},
+		Classifier: &registry.SlotConfig{Impl: "nil"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `classifier "nil": factory returned no implementation`)
+}
+
+type fakeChatPtr struct{}
+
+func (*fakeChatPtr) Chat(context.Context, model.ChatRequest) (model.ChatResponse, error) {
+	return model.ChatResponse{}, nil
 }

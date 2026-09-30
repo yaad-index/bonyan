@@ -1,7 +1,7 @@
 package registry
 
 // TODO(phase 6, recording and replay): replace Recorder with the recorder slot
-// and the stable recording format.
+// and the stable recording format, and revisit ErrNoRecorder with it.
 
 // Failure classifies why a wrapped call did not produce a usable result. It is
 // recorded instead of the error text, which could carry content.
@@ -43,7 +43,9 @@ type assembly struct {
 	rec Recorder
 }
 
-// WithRecorder sends the wrappers' events to rec. Without it they are dropped.
+// WithRecorder sends the wrappers' events to rec. Without it they are dropped,
+// which Assemble allows only when nothing configured has to be recorded (see
+// ErrNoRecorder). A nil rec counts as none.
 func WithRecorder(rec Recorder) Option {
 	return func(a *assembly) { a.rec = rec }
 }
