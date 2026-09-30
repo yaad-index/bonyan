@@ -22,6 +22,7 @@ import (
 
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -36,6 +37,14 @@ const (
 	SlotClassifier = "classifier"
 	SlotTrust      = "trust"
 	SlotHook       = "hook"
+	SlotSecret     = "secret"
+)
+
+// The names the built-in secret sources are registered under. "dir" takes the
+// option {"path": "<directory>"}.
+const (
+	SecretEnv = "env"
+	SecretDir = "dir"
 )
 
 // ErrDuplicate reports a name already registered in a slot.
@@ -124,10 +133,11 @@ type Registry struct {
 	classifiers *slot[model.Classifier]
 	policies    *slot[trust.Policy]
 	hooks       *slot[hook.Hook]
+	secrets     *slot[secret.Source]
 }
 
-// New returns a registry holding only the default trust policy, under
-// trust.DefaultName.
+// New returns a registry holding only the built-ins: the default trust policy,
+// under trust.DefaultName, and the environment and directory secret sources.
 func New() *Registry {
 	r := &Registry{
 		chat:        newSlot[model.Chat](SlotChat),
@@ -135,11 +145,31 @@ func New() *Registry {
 		classifiers: newSlot[model.Classifier](SlotClassifier),
 		policies:    newSlot[trust.Policy](SlotTrust),
 		hooks:       newSlot[hook.Hook](SlotHook),
+		secrets:     newSlot[secret.Source](SlotSecret),
 	}
 	r.policies.factories[trust.DefaultName] = func(json.RawMessage) (trust.Policy, error) {
 		return trust.Default{}, nil
 	}
+	r.secrets.factories[SecretEnv] = func(json.RawMessage) (secret.Source, error) {
+		return secret.Env{}, nil
+	}
+	r.secrets.factories[SecretDir] = dirSource
 	return r
+}
+
+func dirSource(options json.RawMessage) (secret.Source, error) {
+	var o struct {
+		Path string `json:"path"`
+	}
+	if len(options) > 0 {
+		if err := json.Unmarshal(options, &o); err != nil {
+			return nil, err
+		}
+	}
+	if o.Path == "" {
+		return nil, errors.New(`options need a "path"`)
+	}
+	return secret.Dir{Path: o.Path}, nil
 }
 
 // RegisterChat registers a chat model implementation under name. Registering a
@@ -179,6 +209,13 @@ func (r *Registry) RegisterHook(name string, f Factory[hook.Hook]) error {
 	return r.hooks.register(name, f)
 }
 
+// RegisterSecretSource registers a secret source under name.
+func (r *Registry) RegisterSecretSource(name string, f Factory[secret.Source]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.secrets.register(name, f)
+}
+
 // SlotConfig selects one implementation for a slot and carries its options.
 type SlotConfig struct {
 	Impl    string          `json:"impl"`
@@ -197,19 +234,25 @@ type Config struct {
 	// Hooks attaches hooks to points. At each point they run in the order
 	// listed.
 	Hooks map[hook.Point][]SlotConfig `json:"hooks,omitempty"`
+	// Secrets lists the secret sources, tried in order. With none listed, the
+	// environment is the only source.
+	Secrets []SlotConfig `json:"secrets,omitempty"`
 }
 
 // Components are the assembled parts. Every value is bonyan's wrapper around the
 // configured implementation, never the implementation itself. An optional model
-// slot that was not configured is nil. Trust and Hooks are always set: with no
-// policy configured Trust wraps the default policy, and with no hooks Hooks runs
-// none.
+// slot that was not configured is nil. Trust, Hooks and Secrets are always set:
+// with no policy configured Trust wraps the default policy, with no hooks Hooks
+// runs none, and with no secret sources Secrets reads the environment.
 type Components struct {
 	Chat       model.Chat
 	Embedder   model.Embedder
 	Classifier model.Classifier
 	Trust      trust.Policy
 	Hooks      *Hooks
+	// Secrets is the resolver over the configured sources. It resolves nothing
+	// itself; a tool receives a scope of it.
+	Secrets *secret.Resolver
 }
 
 // Hooks holds the hooks configuration attached to each point, in order.
@@ -288,6 +331,20 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			out.Hooks.byPoint[point] = append(out.Hooks.byPoint[point], guardedHook{name: hc.Impl, inner: h, rec: a.rec})
 		}
 	}
+
+	secretCfgs := cfg.Secrets
+	if len(secretCfgs) == 0 {
+		secretCfgs = []SlotConfig{{Impl: SecretEnv}}
+	}
+	sources := make([]secret.Source, 0, len(secretCfgs))
+	for _, sc := range secretCfgs {
+		s, err := r.secrets.build(sc)
+		if err != nil {
+			return Components{}, err
+		}
+		sources = append(sources, s)
+	}
+	out.Secrets = secret.NewResolver(sources...)
 	return out, nil
 }
 
@@ -306,6 +363,8 @@ func (r *Registry) Names(slotName string) []string {
 		return r.policies.names()
 	case SlotHook:
 		return r.hooks.names()
+	case SlotSecret:
+		return r.secrets.names()
 	}
 	return nil
 }
