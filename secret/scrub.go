@@ -3,7 +3,6 @@ package secret
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -151,21 +150,18 @@ func (h scrubHandler) scrubAttrs(attrs []slog.Attr) []slog.Attr {
 	return out
 }
 
-// scrubAttr scrubs one attribute. A value that is not a string is rendered
-// with fmt; if that rendering contains a resolved value, the attribute is
+// scrubAttr scrubs one attribute. A group is scrubbed attribute by attribute.
+// Any other value, of whatever kind (a number, a time, an error), is rendered
+// as text; if the rendering contains a resolved value, the attribute is
 // replaced by the scrubbed rendering, otherwise it is kept as it was.
 func (h scrubHandler) scrubAttr(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
-	switch v.Kind() {
-	case slog.KindString:
-		return slog.String(a.Key, h.s.Scrub(v.String()))
-	case slog.KindGroup:
+	if v.Kind() == slog.KindGroup {
 		return slog.Attr{Key: a.Key, Value: slog.GroupValue(h.scrubAttrs(v.Group())...)}
-	case slog.KindAny:
-		rendered := fmt.Sprint(v.Any())
-		if scrubbed := h.s.Scrub(rendered); scrubbed != rendered {
-			return slog.String(a.Key, scrubbed)
-		}
+	}
+	rendered := v.String()
+	if scrubbed := h.s.Scrub(rendered); scrubbed != rendered {
+		return slog.String(a.Key, scrubbed)
 	}
 	return slog.Attr{Key: a.Key, Value: v}
 }

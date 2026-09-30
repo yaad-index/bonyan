@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -166,6 +167,30 @@ func TestResolvedValueIsScrubbedFromLogOutput(t *testing.T) {
 	assert.Contains(t, out, `"count":3`, "an attribute holding no secret keeps its type")
 	assert.Contains(t, out, `"conn":"db://app:[REDACTED]@db"`)
 	assert.Contains(t, out, `"req":{"q":"select [REDACTED]"}`, "groups survive scrubbing")
+}
+
+// A secret whose value is a number is scrubbed when it is logged as a number,
+// and so is every other kind a value can be logged as.
+func TestNonStringAttributesAreScrubbed(t *testing.T) {
+	r := secret.NewResolver(&countingSource{values: map[string]string{
+		"pin": "4711", "rate": "0.75", "flag": "true", "wait": "1m30s",
+	}})
+	s := r.Scope("pin", "rate", "flag", "wait")
+	for _, n := range []string{"pin", "rate", "flag", "wait"} {
+		_, err := s.Resolve(context.Background(), n)
+		require.NoError(t, err)
+	}
+	var buf bytes.Buffer
+	log := slog.New(r.Scrubber().Handler(slog.NewTextHandler(&buf, nil)))
+
+	log.Info("x", "pin", 4711, "upin", uint64(4711), "rate", 0.75, "flag", true, "wait", 90*time.Second, "other", 12)
+
+	out := buf.String()
+	for _, leaked := range []string{"4711", "0.75", "true", "1m30s"} {
+		assert.NotContains(t, out, leaked)
+	}
+	assert.Contains(t, out, "pin=[REDACTED]")
+	assert.Contains(t, out, "other=12", "a number holding no secret is kept")
 }
 
 func TestRotationIsPickedUpAndOldValueStaysScrubbed(t *testing.T) {
