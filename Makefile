@@ -14,7 +14,7 @@ HOOK_PATH    := .githooks
 # the whole tree and covers them already.
 NESTED       := tokenize/tiktoken
 
-.PHONY: help fmt fmt-check lint vet test build tidy-check githook-check check install-hooks
+.PHONY: help fmt fmt-check lint vet test build tidy-check release-check githook-check check install-hooks
 
 help:
 	@echo "Targets:"
@@ -25,8 +25,9 @@ help:
 	@echo "  test           go test -race -timeout 2m ./... in the root and each nested module"
 	@echo "  build          go build ./... in the root and each nested module"
 	@echo "  tidy-check     verify go.mod / go.sum are tidy in every module (go mod tidy -diff)"
+	@echo "  release-check  refuse a nested module whose release version is set while it still requires the placeholder root"
 	@echo "  githook-check  fmt-check + vet + lint + tidy-check (what the pre-commit hook runs)"
-	@echo "  check          full CI chain: vet + build + test + fmt-check + lint + tidy-check"
+	@echo "  check          full CI chain: vet + build + test + fmt-check + lint + tidy-check + release-check"
 	@echo "  install-hooks  generate .githooks/pre-commit and point git core.hooksPath at it"
 
 fmt:
@@ -71,9 +72,15 @@ tidy-check:
 	cd tools && go mod tidy -diff
 	for m in $(NESTED); do (cd $$m && go mod tidy -diff) || exit 1; done
 
+# A nested module must not be released while it still requires the root at the
+# placeholder version it is developed against (ADR 0002, section 5). The check
+# is a Go program in the tools module, so it needs nothing besides Go.
+release-check:
+	cd tools && go run ./releasecheck .. $(NESTED)
+
 githook-check: fmt-check vet lint tidy-check
 
-check: vet build test fmt-check lint tidy-check
+check: vet build test fmt-check lint tidy-check release-check
 
 install-hooks:
 	@mkdir -p $(HOOK_PATH)

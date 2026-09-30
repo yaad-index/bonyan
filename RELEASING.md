@@ -75,7 +75,9 @@ requirement, so releasing a nested module takes two steps:
 2. Before merging the nested module's release PR, land a PR that raises its
    requirement on `github.com/yaad-index/bonyan` from the placeholder to that
    released root version. Do not merge a nested release PR while its `go.mod`
-   still requires the placeholder.
+   still requires the placeholder. `make check`, which CI runs on the release
+   PR, fails in that state (`make release-check`), so the PR cannot merge until
+   the requirement is raised.
 
 Verify the tag on the first release PR that includes a nested module rather
 than trusting the config: its proposed tag must read `tokenize/tiktoken/vX.Y.Z`.
