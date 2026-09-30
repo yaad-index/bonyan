@@ -6,6 +6,7 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -44,10 +45,10 @@ func (g guardedClassifier) Classify(ctx context.Context, text content.Untrusted)
 type guardedPolicy struct {
 	name  string
 	inner trust.Policy
-	rec   Recorder
+	rec   events
 }
 
-func guardPolicy(name string, p trust.Policy, rec Recorder) trust.Policy {
+func guardPolicy(name string, p trust.Policy, rec events) trust.Policy {
 	return guardedPolicy{name: name, inner: p, rec: rec}
 }
 
@@ -60,12 +61,12 @@ func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) 
 	if failure != "" {
 		d = trust.Decision{Verdict: trust.Untrusted}
 	}
-	g.rec.Record(Event{
+	g.rec.Event(record.Event{
 		Slot:     SlotTrust,
 		Name:     g.name,
 		Source:   string(source.Kind),
 		Decision: d.Verdict.String(),
-		Failure:  failure,
+		Failure:  string(failure),
 	})
 	return d, nil
 }
@@ -75,14 +76,14 @@ func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) 
 type guardedHook struct {
 	name  string
 	inner hook.Hook
-	rec   Recorder
+	rec   events
 }
 
 // Observe never returns an error; a failure is recorded instead.
 func (g guardedHook) Observe(ctx context.Context, ev hook.Event) error {
 	_, failure := call(ctx, func() (struct{}, error) { return struct{}{}, g.inner.Observe(ctx, ev) })
 	if failure != "" {
-		g.rec.Record(Event{Slot: SlotHook, Name: g.name, Point: string(ev.Point), Failure: failure})
+		g.rec.Event(record.Event{Slot: SlotHook, Name: g.name, Point: string(ev.Point), Failure: string(failure)})
 	}
 	return nil
 }

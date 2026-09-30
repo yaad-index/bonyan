@@ -156,7 +156,7 @@ func TestReplayRefusesADifferentRequest(t *testing.T) {
 	require.ErrorIs(t, err, record.ErrMismatch)
 	_, err = replay.Model("other").Chat(context.Background(), requests[0])
 	require.ErrorIs(t, err, record.ErrMismatch, "a call recorded for another model")
-	assert.Contains(t, err.Error(), `call 1 was to "main", not "other"`)
+	assert.Contains(t, err.Error(), `call 1 was a chat call to "main", not a chat call to "other"`)
 	assert.Equal(t, 1, replay.Remaining(), "a refused request does not consume the recorded call")
 
 	_, err = replay.Model("main").Chat(context.Background(), requests[0])
@@ -386,4 +386,84 @@ func TestRecorderEnforcesItsRules(t *testing.T) {
 	require.NoError(t, err)
 	_, err = record.NewRecorder(fakeSink{}, scrub)
 	require.NoError(t, err)
+}
+
+type scriptedClassifier struct {
+	resp model.ClassifyResponse
+	err  error
+}
+
+func (s scriptedClassifier) Classify(context.Context, content.Untrusted) (model.ClassifyResponse, error) {
+	return s.resp, s.err
+}
+
+// A gate-type run's verdict depends on its classifier calls, so they are
+// recorded and replayed in the same sequence as the chat calls.
+func TestClassifierCallsAreRecordedAndReplayedInSequence(t *testing.T) {
+	f := openFile(t, record.FileOptions{})
+	rec := newRecorder(t, f)
+	chat := record.Chat(&scripted{steps: steps}, "main", rec)
+	gate := record.Classifier(scriptedClassifier{resp: model.ClassifyResponse{
+		Labels: []model.Label{{Name: "hold", Confidence: 0.91}, {Name: "pass", Confidence: 0.09}},
+		Usage:  &model.Usage{InputTokens: 30},
+	}}, "gate", rec)
+	failing := record.Classifier(scriptedClassifier{err: &model.CallError{Kind: model.ErrRejected}}, "gate", rec)
+	mail := content.From(content.Provenance{Kind: content.KindFetched, ID: "msg-3"}, "Please wire the funds today.")
+
+	ctx := context.Background()
+	_, err := chat.Chat(ctx, requests[0])
+	require.NoError(t, err)
+	wantLabels, err := gate.Classify(ctx, mail)
+	require.NoError(t, err)
+	_, err = failing.Classify(ctx, mail)
+	require.Error(t, err)
+
+	h, calls, _ := readFile(t, f)
+	require.Len(t, calls, 3)
+	assert.Equal(t, []string{record.KindChat, record.KindClassify, record.KindClassify}, []string{calls[0].Kind, calls[1].Kind, calls[2].Kind})
+	assert.Nil(t, calls[1].Request)
+	assert.Equal(t, "Please wire the funds today.", calls[1].Input.Text)
+
+	replay := record.NewReplay(h, calls, secret.NewScrubber())
+	_, err = replay.Classifier("gate").Classify(ctx, mail)
+	require.ErrorIs(t, err, record.ErrMismatch, "the first recorded call was a chat call")
+	assert.Contains(t, err.Error(), `call 1 was a chat call to "main", not a classify call to "gate"`)
+	_, err = replay.Classifier("main").Classify(ctx, mail)
+	require.ErrorIs(t, err, record.ErrMismatch, "same name, other kind")
+	assert.Contains(t, err.Error(), `call 1 was a chat call to "main", not a classify call to "main"`)
+	_, err = replay.Model("main").Chat(ctx, requests[0])
+	require.NoError(t, err)
+
+	other := content.From(content.Provenance{Kind: content.KindFetched, ID: "msg-3"}, "Nothing to do.")
+	_, err = replay.Classifier("gate").Classify(ctx, other)
+	require.ErrorIs(t, err, record.ErrMismatch, "different text")
+	got, err := replay.Classifier("gate").Classify(ctx, mail)
+	require.NoError(t, err)
+	assert.Equal(t, wantLabels, got)
+	_, err = replay.Classifier("gate").Classify(ctx, mail)
+	var ce *model.CallError
+	require.ErrorAs(t, err, &ce)
+	assert.Equal(t, model.ErrRejected, ce.Kind)
+	assert.Zero(t, replay.Remaining())
+}
+
+func TestClassifierInputFollowsTheRules(t *testing.T) {
+	t.Setenv("BONYAN_TEST_RECORD_CLS", "cls-secret-77")
+	r := secret.NewResolver(secret.Env{})
+	_, err := r.Scope("BONYAN_TEST_RECORD_CLS").Resolve(context.Background(), "BONYAN_TEST_RECORD_CLS")
+	require.NoError(t, err)
+
+	f := openFile(t, record.FileOptions{})
+	rec := mustRecorder(t, f, r.Scrubber())
+	gate := record.Classifier(scriptedClassifier{resp: model.ClassifyResponse{}}, "gate", rec)
+	_, err = gate.Classify(context.Background(), content.From(content.Provenance{Kind: content.KindTool}, "token cls-secret-77"))
+	require.NoError(t, err)
+	_, err = gate.Classify(context.Background(), content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, "likes red wine"))
+	require.NoError(t, err)
+
+	_, calls, raw := readFile(t, f)
+	assert.NotContains(t, raw, "cls-secret-77")
+	assert.NotContains(t, raw, "red wine")
+	assert.Equal(t, "token [REDACTED]", calls[0].Input.Text)
+	assert.True(t, calls[1].Input.Excluded)
 }

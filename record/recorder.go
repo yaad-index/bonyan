@@ -54,14 +54,33 @@ func (r *Recorder) Call(modelName string, req model.ChatRequest, resp model.Chat
 	rec := r.red.request(req)
 	c := Call{
 		Seq:         r.seq.Add(1),
+		Kind:        KindChat,
 		Model:       modelName,
-		Fingerprint: fingerprint(modelName, rec),
-		Request:     rec,
+		Fingerprint: fingerprint(KindChat, modelName, rec),
+		Request:     &rec,
 	}
 	if callErr != nil {
 		c.ErrorKind = errorKind(callErr)
 	} else {
 		c.Response = r.red.response(resp)
+	}
+	r.write(Entry{Call: &c})
+}
+
+// Classify records one classifier call, redacted like a chat request's parts.
+func (r *Recorder) Classify(modelName string, text content.Untrusted, resp model.ClassifyResponse, callErr error) {
+	in := r.red.part(text)
+	c := Call{
+		Seq:         r.seq.Add(1),
+		Kind:        KindClassify,
+		Model:       modelName,
+		Fingerprint: fingerprint(KindClassify, modelName, in),
+		Input:       &in,
+	}
+	if callErr != nil {
+		c.ErrorKind = errorKind(callErr)
+	} else {
+		c.Response = r.red.labels(resp)
 	}
 	r.write(Entry{Call: &c})
 }
@@ -75,6 +94,23 @@ func (r *Recorder) write(e Entry) {
 // Chat wraps a chat model so that every call through it is recorded.
 func Chat(inner model.Chat, modelName string, rec *Recorder) model.Chat {
 	return recordedChat{inner: inner, name: modelName, rec: rec}
+}
+
+// Classifier wraps a classifier so that every call through it is recorded.
+func Classifier(inner model.Classifier, modelName string, rec *Recorder) model.Classifier {
+	return recordedClassifier{inner: inner, name: modelName, rec: rec}
+}
+
+type recordedClassifier struct {
+	inner model.Classifier
+	name  string
+	rec   *Recorder
+}
+
+func (c recordedClassifier) Classify(ctx context.Context, text content.Untrusted) (model.ClassifyResponse, error) {
+	resp, err := c.inner.Classify(ctx, text)
+	c.rec.Classify(c.name, text, resp, err)
+	return resp, err
 }
 
 type recordedChat struct {
@@ -105,13 +141,14 @@ func errorKind(err error) model.ErrorKind {
 	return ErrorOther
 }
 
-// fingerprint identifies a redacted request, so replay can check that it is
+// fingerprint identifies a redacted call, so replay can check that it is
 // answering the call that was recorded.
-func fingerprint(modelName string, req Request) string {
+func fingerprint(kind, modelName string, input any) string {
 	b, err := json.Marshal(struct {
-		Model   string  `json:"model"`
-		Request Request `json:"request"`
-	}{modelName, req})
+		Kind  string `json:"kind"`
+		Model string `json:"model"`
+		Input any    `json:"input"`
+	}{kind, modelName, input})
 	if err != nil {
 		return ""
 	}
@@ -175,6 +212,17 @@ func (r redactor) part(p content.Text) Part {
 		return Part{Text: r.text(v.Raw()), Provenance: &prov}
 	}
 	return Part{Excluded: true}
+}
+
+func (r redactor) labels(resp model.ClassifyResponse) Response {
+	var out Response
+	for _, l := range resp.Labels {
+		out.Labels = append(out.Labels, Label{Name: l.Name, Confidence: l.Confidence})
+	}
+	if resp.Usage != nil {
+		out.Usage = &Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
+	}
+	return out
 }
 
 func (r redactor) response(resp model.ChatResponse) Response {

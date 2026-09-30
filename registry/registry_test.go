@@ -16,6 +16,7 @@ import (
 
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
 )
@@ -146,21 +147,27 @@ func TestUnconfiguredOptionalSlotsAreNil(t *testing.T) {
 }
 
 // Every assembled part is bonyan's wrapper, never the registered
-// implementation: its concrete type is declared in the registry package, or for
-// Secrets is the secret package's resolver around the sources, and the calls
-// still reach the implementation through it.
+// implementation: its concrete type is declared in the registry package, or,
+// for Secrets and Recorder, is the secret or record package's own type around
+// the sources or the sink. The calls still reach the implementation through it.
 func TestEveryPartIsWrapped(t *testing.T) {
 	c, err := newRegistry(t).Assemble(registry.Config{
 		Chat:       registry.SlotConfig{Impl: "basic"},
 		Embedder:   &registry.SlotConfig{Impl: "basic"},
 		Classifier: &registry.SlotConfig{Impl: "basic"},
-	})
+	}, registry.WithSink(&events{}))
 	require.NoError(t, err)
 
 	registryPkg := reflect.TypeOf(registry.Registry{}).PkgPath()
-	wrapperPkg := map[string]string{"Secrets": reflect.TypeOf(secret.Resolver{}).PkgPath()}
+	wrapperPkg := map[string]string{
+		"Secrets":  reflect.TypeOf(secret.Resolver{}).PkgPath(),
+		"Recorder": reflect.TypeOf(record.Recorder{}).PkgPath(),
+	}
 	parts := reflect.ValueOf(c)
 	for i := 0; i < parts.NumField(); i++ {
+		if !parts.Type().Field(i).IsExported() {
+			continue
+		}
 		field := parts.Type().Field(i).Name
 		v := parts.Field(i)
 		require.False(t, v.IsNil(), "%s not assembled", field)
