@@ -116,11 +116,11 @@ func TestValueNeverPrints(t *testing.T) {
 }
 
 func TestResolvedValueIsScrubbedFromToolOutput(t *testing.T) {
-	r := secret.NewResolver(&countingSource{values: map[string]string{"api_key": "sk-live-9f8e7d"}})
+	r := secret.NewResolver(&countingSource{values: map[string]string{"api_key": "key-9f8e7d"}})
 	_, err := r.Scope("api_key").Resolve(context.Background(), "api_key")
 	require.NoError(t, err)
 
-	msg := model.ToolResult("call-1", `{"echo":"Authorization: Bearer sk-live-9f8e7d"}`)
+	msg := model.ToolResult("call-1", `{"echo":"Authorization: Bearer key-9f8e7d"}`)
 	for i, p := range msg.Parts {
 		msg.Parts[i] = r.Scrubber().ScrubText(p)
 	}
@@ -130,7 +130,7 @@ func TestResolvedValueIsScrubbedFromToolOutput(t *testing.T) {
 	assert.Equal(t, `{"echo":"Authorization: Bearer [REDACTED]"}`, u.Raw())
 	assert.Equal(t, content.Provenance{Kind: content.KindTool, ID: "call-1"}, u.Provenance())
 
-	tr, ok := r.Scrubber().ScrubText(content.Instruction("use sk-live-9f8e7d")).(content.Trusted)
+	tr, ok := r.Scrubber().ScrubText(content.Instruction("use key-9f8e7d")).(content.Trusted)
 	require.True(t, ok, "trusted text stays trusted")
 	assert.Equal(t, "use [REDACTED]", tr.String())
 }
@@ -146,7 +146,7 @@ func TestResolvedValueIsScrubbedFromLogOutput(t *testing.T) {
 
 	// Bound before the value is resolved: still scrubbed when the record is
 	// handled.
-	bound := log.With("conn", "postgres://app:correct-horse@db").WithGroup("req")
+	bound := log.With("conn", "db://app:correct-horse@db").WithGroup("req")
 
 	_, err := r.Scope("pw").Resolve(context.Background(), "pw")
 	require.NoError(t, err)
@@ -164,7 +164,7 @@ func TestResolvedValueIsScrubbedFromLogOutput(t *testing.T) {
 	assert.NotContains(t, out, "correct-horse")
 	assert.Contains(t, out, `"msg":"login with [REDACTED]"`)
 	assert.Contains(t, out, `"count":3`, "an attribute holding no secret keeps its type")
-	assert.Contains(t, out, `"conn":"postgres://app:[REDACTED]@db"`)
+	assert.Contains(t, out, `"conn":"db://app:[REDACTED]@db"`)
 	assert.Contains(t, out, `"req":{"q":"select [REDACTED]"}`, "groups survive scrubbing")
 }
 

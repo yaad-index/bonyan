@@ -1,10 +1,13 @@
 package registry_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/registry"
+	"github.com/yaad-index/bonyan/secret"
 )
 
 // fakeChat answers every request with its own name, so a test can tell which
@@ -141,9 +145,10 @@ func TestUnconfiguredOptionalSlotsAreNil(t *testing.T) {
 	assert.Nil(t, c.Classifier)
 }
 
-// Every assembled part is the registry's wrapper, never the registered
-// implementation: its concrete type is declared in the registry package, and
-// the calls still reach the implementation through it.
+// Every assembled part is bonyan's wrapper, never the registered
+// implementation: its concrete type is declared in the registry package, or for
+// Secrets is the secret package's resolver around the sources, and the calls
+// still reach the implementation through it.
 func TestEveryPartIsWrapped(t *testing.T) {
 	c, err := newRegistry(t).Assemble(registry.Config{
 		Chat:       registry.SlotConfig{Impl: "basic"},
@@ -153,12 +158,14 @@ func TestEveryPartIsWrapped(t *testing.T) {
 	require.NoError(t, err)
 
 	registryPkg := reflect.TypeOf(registry.Registry{}).PkgPath()
+	wrapperPkg := map[string]string{"Secrets": reflect.TypeOf(secret.Resolver{}).PkgPath()}
 	parts := reflect.ValueOf(c)
 	for i := 0; i < parts.NumField(); i++ {
 		field := parts.Type().Field(i).Name
 		v := parts.Field(i)
 		require.False(t, v.IsNil(), "%s not assembled", field)
-		assert.Equal(t, registryPkg, v.Elem().Type().PkgPath(), "%s is not the registry's wrapper", field)
+		want := cmp.Or(wrapperPkg[field], registryPkg)
+		assert.Equal(t, want, v.Elem().Type().PkgPath(), "%s is not bonyan's wrapper", field)
 	}
 
 	ctx := context.Background()
@@ -206,4 +213,44 @@ type fakeChatPtr struct{}
 
 func (*fakeChatPtr) Chat(context.Context, model.ChatRequest) (model.ChatResponse, error) {
 	return model.ChatResponse{}, nil
+}
+
+func TestSecretSources(t *testing.T) {
+	ctx := context.Background()
+	chat := registry.SlotConfig{Impl: "basic"}
+
+	t.Setenv("BONYAN_TEST_REGISTRY_SECRET", "from-env")
+	c, err := newRegistry(t).Assemble(registry.Config{Chat: chat})
+	require.NoError(t, err)
+	v, err := c.Secrets.Scope("BONYAN_TEST_REGISTRY_SECRET").Resolve(ctx, "BONYAN_TEST_REGISTRY_SECRET")
+	require.NoError(t, err)
+	assert.Equal(t, "from-env", v.Reveal(), "with no sources configured, the environment is read")
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "BONYAN_TEST_REGISTRY_SECRET"), []byte("from-dir\n"), 0o600))
+	opts, err := json.Marshal(map[string]string{"path": dir})
+	require.NoError(t, err)
+	c, err = newRegistry(t).Assemble(registry.Config{Chat: chat, Secrets: []registry.SlotConfig{
+		{Impl: registry.SecretDir, Options: opts},
+		{Impl: registry.SecretEnv},
+	}})
+	require.NoError(t, err)
+	v, err = c.Secrets.Scope("BONYAN_TEST_REGISTRY_SECRET").Resolve(ctx, "BONYAN_TEST_REGISTRY_SECRET")
+	require.NoError(t, err)
+	assert.Equal(t, "from-dir", v.Reveal(), "configured sources are tried in order")
+
+	r := newRegistry(t)
+	require.NoError(t, r.RegisterSecretSource("program", func(json.RawMessage) (secret.Source, error) {
+		return secret.Dir{Path: dir}, nil
+	}))
+	_, err = r.Assemble(registry.Config{Chat: chat, Secrets: []registry.SlotConfig{{Impl: "program"}}})
+	require.NoError(t, err)
+
+	_, err = r.Assemble(registry.Config{Chat: chat, Secrets: []registry.SlotConfig{{Impl: registry.SecretDir}}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `secret "dir": options need a "path"`)
+
+	_, err = r.Assemble(registry.Config{Chat: chat, Secrets: []registry.SlotConfig{{Impl: "remote-store"}}})
+	require.ErrorIs(t, err, registry.ErrUnknown)
+	assert.Contains(t, err.Error(), `secret "remote-store" (registered: [dir env program])`)
 }
