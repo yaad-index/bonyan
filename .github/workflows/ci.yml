@@ -25,12 +25,17 @@ jobs:
           # Track the version pinned in go.mod so CI and the module stay in
           # lockstep.
           go-version-file: go.mod
-          # Key the module and build cache on the tools module: building the
-          # linter dominates the time a cold run takes.
-          cache-dependency-path: tools/go.sum
+          # Key the module and build cache on every module's go.sum: building
+          # the linter dominates a cold run, and the nested module's
+          # dependencies are large.
+          cache-dependency-path: |
+            tools/go.sum
+            go.sum
+            tokenize/tiktoken/go.sum
 
       - name: Check
         # The same target a contributor runs: vet, build, race tests, formatting
-        # (gofumpt, goimports), lint and tidiness of both modules. The tools are
-        # built from tools/go.mod, so nothing is installed separately.
+        # (gofumpt, goimports), lint and tidiness of every module, nested ones
+        # included. The tools are built from tools/go.mod, so nothing is
+        # installed separately.
         run: make check

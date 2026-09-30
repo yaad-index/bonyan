@@ -161,3 +161,64 @@ func TestInvalidInput(t *testing.T) {
 	tokens, _ := m.Spent()
 	assert.Zero(t, tokens, "negative usage is never charged as a refund")
 }
+
+// failingChat fails every call with err.
+type failingChat struct {
+	calls int
+	err   error
+}
+
+func (f *failingChat) Chat(context.Context, model.ChatRequest) (model.ChatResponse, error) {
+	f.calls++
+	return model.ChatResponse{}, f.err
+}
+
+// A call that fails after its request may have reached the provider is charged
+// its bound; one the adapter shows was never sent is not (ADR 0001 §11).
+func TestFailedCallIsChargedItsBoundUnlessNeverSent(t *testing.T) {
+	counter := tokenize.ByteBound{}
+	req := model.ChatRequest{Messages: []model.Message{userMsg("hello")}, MaxOutputTokens: 20}
+	bound, err := counter.Count(req)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name    string
+		err     error
+		charged bool
+	}{
+		{"timeout mid-generation", &model.CallError{Kind: model.ErrTimeout}, true},
+		{"transport, may have been sent", &model.CallError{Kind: model.ErrTransport}, true},
+		{"not a call error", context.DeadlineExceeded, true},
+		{"never sent", &model.CallError{Kind: model.ErrTransport, NotSent: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := budget.NewMeter(1_000_000, 1_000_000, prices)
+			require.NoError(t, err)
+			_, err = budget.Chat(&failingChat{err: tc.err}, "small", m, counter).Chat(context.Background(), req)
+			require.ErrorIs(t, err, tc.err, "the call's own error is returned")
+			tokens, cost := m.Spent()
+			if !tc.charged {
+				assert.Zero(t, tokens)
+				assert.Zero(t, cost)
+				return
+			}
+			assert.Equal(t, bound+20, tokens)
+			assert.Equal(t, bound*1+20*2, cost, "input at 1 micro and output at 2 per token")
+		})
+	}
+}
+
+// Charging a bound that crosses the ceiling is reported like any other charge.
+// Through Chat this needs two calls admitted at once, since Admit has already
+// checked the same bound.
+func TestChargeBoundCrossingTheCeiling(t *testing.T) {
+	m, err := budget.NewMeter(100, 1_000_000, prices)
+	require.NoError(t, err)
+	require.NoError(t, m.ChargeBound("small", 60, 20))
+	require.ErrorIs(t, m.ChargeBound("small", 10, 20), budget.ErrExceeded)
+	tokens, _ := m.Spent()
+	assert.Equal(t, int64(110), tokens)
+
+	require.Error(t, m.ChargeBound("small", -1, 1))
+	require.Error(t, m.ChargeBound("small", 1, -1))
+}
