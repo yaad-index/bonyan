@@ -71,6 +71,7 @@ type Request struct {
 type Message struct {
 	Role       model.Role `json:"role"`
 	Parts      []Part     `json:"parts"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
