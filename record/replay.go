@@ -9,6 +9,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/secret"
 )
@@ -77,6 +78,31 @@ func (r *Replay) Model(name string) model.Chat {
 	return replayChat{r: r, name: name}
 }
 
+// Classifier returns a classifier that answers as the classifier recorded
+// under name. It shares the replay's sequence with Model.
+func (r *Replay) Classifier(name string) model.Classifier {
+	return replayClassifier{r: r, name: name}
+}
+
+// take returns the next recorded call if it is a kind call to name whose
+// fingerprint is fp, and advances past it.
+func (r *Replay) take(kind, name string, input any) (Call, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.next >= len(r.calls) {
+		return Call{}, ErrExhausted
+	}
+	want := r.calls[r.next]
+	if want.Kind != kind || want.Model != name {
+		return Call{}, fmt.Errorf("%w: call %d was a %s call to %q, not a %s call to %q", ErrMismatch, want.Seq, want.Kind, want.Model, kind, name)
+	}
+	if fingerprint(kind, name, input) != want.Fingerprint {
+		return Call{}, fmt.Errorf("%w: call %d", ErrMismatch, want.Seq)
+	}
+	r.next++
+	return want, nil
+}
+
 // Remaining reports how many recorded calls have not been served.
 func (r *Replay) Remaining() int {
 	r.mu.Lock()
@@ -93,22 +119,31 @@ func (c replayChat) Chat(ctx context.Context, req model.ChatRequest) (model.Chat
 	if err := ctx.Err(); err != nil {
 		return model.ChatResponse{}, err
 	}
-	r := c.r
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.next >= len(r.calls) {
-		return model.ChatResponse{}, ErrExhausted
+	want, err := c.r.take(KindChat, c.name, c.r.red.request(req))
+	if err != nil {
+		return model.ChatResponse{}, err
 	}
-	want := r.calls[r.next]
-	if want.Model != c.name {
-		return model.ChatResponse{}, fmt.Errorf("%w: call %d was to %q, not %q", ErrMismatch, want.Seq, want.Model, c.name)
-	}
-	if got := fingerprint(c.name, r.red.request(req)); got != want.Fingerprint {
-		return model.ChatResponse{}, fmt.Errorf("%w: call %d", ErrMismatch, want.Seq)
-	}
-	r.next++
 	if want.ErrorKind != "" {
 		return model.ChatResponse{}, &model.CallError{Kind: want.ErrorKind}
 	}
 	return want.Response.model(), nil
+}
+
+type replayClassifier struct {
+	r    *Replay
+	name string
+}
+
+func (c replayClassifier) Classify(ctx context.Context, text content.Untrusted) (model.ClassifyResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return model.ClassifyResponse{}, err
+	}
+	want, err := c.r.take(KindClassify, c.name, c.r.red.part(text))
+	if err != nil {
+		return model.ClassifyResponse{}, err
+	}
+	if want.ErrorKind != "" {
+		return model.ClassifyResponse{}, &model.CallError{Kind: want.ErrorKind}
+	}
+	return want.Response.classify(), nil
 }

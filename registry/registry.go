@@ -22,6 +22,7 @@ import (
 
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
@@ -38,6 +39,7 @@ const (
 	SlotTrust      = "trust"
 	SlotHook       = "hook"
 	SlotSecret     = "secret"
+	SlotRecording  = "recording"
 )
 
 // The names the built-in secret sources are registered under. "dir" takes the
@@ -55,10 +57,10 @@ var ErrDuplicate = errors.New("registry: name already registered")
 var ErrUnknown = errors.New("registry: unknown implementation")
 
 // ErrNoRecorder reports configuration whose parts must be recorded, assembled
-// without a recorder: a trust policy other than the default, whose decisions
+// without a recording: a trust policy other than the default, whose decisions
 // may declare sources trusted, or hooks, whose failures are recorded instead of
 // changing the run.
-var ErrNoRecorder = errors.New("registry: a recorder is required")
+var ErrNoRecorder = errors.New("registry: a recording is required")
 
 // slot holds the named factories for one kind of part.
 type slot[T any] struct {
@@ -134,10 +136,12 @@ type Registry struct {
 	policies    *slot[trust.Policy]
 	hooks       *slot[hook.Hook]
 	secrets     *slot[secret.Source]
+	sinks       *slot[record.Sink]
 }
 
 // New returns a registry holding only the built-ins: the default trust policy,
-// under trust.DefaultName, and the environment and directory secret sources.
+// under trust.DefaultName, the environment and directory secret sources, and
+// the file recording sink.
 func New() *Registry {
 	r := &Registry{
 		chat:        newSlot[model.Chat](SlotChat),
@@ -146,6 +150,7 @@ func New() *Registry {
 		policies:    newSlot[trust.Policy](SlotTrust),
 		hooks:       newSlot[hook.Hook](SlotHook),
 		secrets:     newSlot[secret.Source](SlotSecret),
+		sinks:       newSlot[record.Sink](SlotRecording),
 	}
 	r.policies.factories[trust.DefaultName] = func(json.RawMessage) (trust.Policy, error) {
 		return trust.Default{}, nil
@@ -154,6 +159,7 @@ func New() *Registry {
 		return secret.Env{}, nil
 	}
 	r.secrets.factories[SecretDir] = dirSource
+	r.sinks.factories[SinkFile] = fileSink
 	return r
 }
 
@@ -216,6 +222,13 @@ func (r *Registry) RegisterSecretSource(name string, f Factory[secret.Source]) e
 	return r.secrets.register(name, f)
 }
 
+// RegisterSink registers a recording sink under name.
+func (r *Registry) RegisterSink(name string, f Factory[record.Sink]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sinks.register(name, f)
+}
+
 // SlotConfig selects one implementation for a slot and carries its options.
 type SlotConfig struct {
 	Impl    string          `json:"impl"`
@@ -237,6 +250,9 @@ type Config struct {
 	// Secrets lists the secret sources, tried in order. With none listed, the
 	// environment is the only source.
 	Secrets []SlotConfig `json:"secrets,omitempty"`
+	// Recording selects the sink model calls and wrapper events are recorded
+	// to. With none, nothing is recorded.
+	Recording *SlotConfig `json:"recording,omitempty"`
 }
 
 // Components are the assembled parts. Every value is bonyan's wrapper around the
@@ -253,6 +269,23 @@ type Components struct {
 	// Secrets is the resolver over the configured sources. It resolves nothing
 	// itself; a tool receives a scope of it.
 	Secrets *secret.Resolver
+	// Recorder records to the configured sink, scrubbing with Secrets'
+	// scrubber. It is nil when no recording is configured. Chat and
+	// classifier calls and the wrappers' events are recorded; embedder calls
+	// are not.
+	Recorder *record.Recorder
+
+	// owned is a sink the registry opened, which Close closes.
+	owned record.Sink
+}
+
+// Close closes the recording sink if the registry opened it from
+// configuration. A sink passed with WithSink is the program's to close.
+func (c Components) Close() error {
+	if c.owned == nil {
+		return nil
+	}
+	return c.owned.Close()
 }
 
 // Hooks holds the hooks configuration attached to each point, in order.
@@ -267,58 +300,60 @@ func (h *Hooks) Run(ctx context.Context, ev hook.Event) {
 	}
 }
 
-// Assemble builds every configured part and wraps it.
+// Assemble builds every configured part and wraps it. Every implementation is
+// built first; the recording is opened last, so a configuration that fails to
+// assemble leaves no file behind.
 func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 	var a assembly
 	for _, o := range opts {
 		o(&a)
 	}
-	if a.rec == nil {
+	if a.sink != nil && cfg.Recording != nil {
+		return Components{}, errTwoSinks
+	}
+	if a.sink == nil && cfg.Recording == nil {
 		if cfg.Trust != nil && cfg.Trust.Impl != trust.DefaultName {
 			return Components{}, fmt.Errorf("%w: trust policy %q", ErrNoRecorder, cfg.Trust.Impl)
 		}
 		if len(cfg.Hooks) > 0 {
 			return Components{}, fmt.Errorf("%w: hooks are configured", ErrNoRecorder)
 		}
-		a.rec = discard{}
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var out Components
 	chat, err := r.chat.build(cfg.Chat)
 	if err != nil {
 		return Components{}, err
 	}
-	out.Chat = guardChat(chat)
-
+	var emb model.Embedder
 	if cfg.Embedder != nil {
-		e, err := r.embedders.build(*cfg.Embedder)
-		if err != nil {
+		if emb, err = r.embedders.build(*cfg.Embedder); err != nil {
 			return Components{}, err
 		}
-		out.Embedder = guardEmbedder(e)
 	}
+	var cls model.Classifier
 	if cfg.Classifier != nil {
-		c, err := r.classifiers.build(*cfg.Classifier)
-		if err != nil {
+		if cls, err = r.classifiers.build(*cfg.Classifier); err != nil {
 			return Components{}, err
 		}
-		out.Classifier = guardClassifier(c)
 	}
 
 	policyCfg := SlotConfig{Impl: trust.DefaultName}
 	if cfg.Trust != nil {
 		policyCfg = *cfg.Trust
 	}
-	p, err := r.policies.build(policyCfg)
+	policy, err := r.policies.build(policyCfg)
 	if err != nil {
 		return Components{}, err
 	}
-	out.Trust = guardPolicy(policyCfg.Impl, p, a.rec)
 
-	out.Hooks = &Hooks{byPoint: map[hook.Point][]hook.Hook{}}
+	type attached struct {
+		name string
+		h    hook.Hook
+	}
+	hooks := map[hook.Point][]attached{}
 	for point, list := range cfg.Hooks {
 		if !point.Valid() {
 			return Components{}, fmt.Errorf("registry: unknown hook point %q", point)
@@ -328,7 +363,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			if err != nil {
 				return Components{}, err
 			}
-			out.Hooks.byPoint[point] = append(out.Hooks.byPoint[point], guardedHook{name: hc.Impl, inner: h, rec: a.rec})
+			hooks[point] = append(hooks[point], attached{name: hc.Impl, h: h})
 		}
 	}
 
@@ -344,7 +379,46 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		}
 		sources = append(sources, s)
 	}
-	out.Secrets = secret.NewResolver(sources...)
+
+	out := Components{Secrets: secret.NewResolver(sources...)}
+	sink := a.sink
+	if cfg.Recording != nil {
+		if sink, err = r.sinks.build(*cfg.Recording); err != nil {
+			return Components{}, err
+		}
+		out.owned = sink
+	}
+	var ev events = discard{}
+	if sink != nil {
+		rec, err := record.NewRecorder(sink, out.Secrets.Scrubber())
+		if err != nil {
+			if out.owned != nil {
+				_ = out.owned.Close()
+			}
+			return Components{}, err
+		}
+		out.Recorder = rec
+		ev = rec
+		chat = record.Chat(chat, cfg.Chat.Impl, rec)
+		if cls != nil {
+			cls = record.Classifier(cls, cfg.Classifier.Impl, rec)
+		}
+	}
+
+	out.Chat = guardChat(chat)
+	if emb != nil {
+		out.Embedder = guardEmbedder(emb)
+	}
+	if cls != nil {
+		out.Classifier = guardClassifier(cls)
+	}
+	out.Trust = guardPolicy(policyCfg.Impl, policy, ev)
+	out.Hooks = &Hooks{byPoint: map[hook.Point][]hook.Hook{}}
+	for point, list := range hooks {
+		for _, x := range list {
+			out.Hooks.byPoint[point] = append(out.Hooks.byPoint[point], guardedHook{name: x.name, inner: x.h, rec: ev})
+		}
+	}
 	return out, nil
 }
 
@@ -365,6 +439,8 @@ func (r *Registry) Names(slotName string) []string {
 		return r.hooks.names()
 	case SlotSecret:
 		return r.secrets.names()
+	case SlotRecording:
+		return r.sinks.names()
 	}
 	return nil
 }

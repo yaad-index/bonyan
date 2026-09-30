@@ -1,5 +1,5 @@
 // Package record writes model calls to recordings and replays them (ADR 0001
-// §8).
+// §8). Chat and classifier calls are recorded; embedding calls are not.
 //
 // A recording is a JSON Lines file: a header line, then one line per entry.
 // The header names the format and its version, so a reader can refuse a
@@ -31,18 +31,29 @@ type Header struct {
 	Created time.Time `json:"created"`
 }
 
-// Entry is one line after the header: a model call or an event.
+// Entry is one line after the header: a model call or an event. Chat and
+// classifier calls share one sequence, so a replay serves them in the order a
+// run made them.
 type Entry struct {
 	Call  *Call  `json:"call,omitempty"`
 	Event *Event `json:"event,omitempty"`
 }
 
-// Call is one recorded model call.
+// The kinds of recorded call.
+const (
+	KindChat     = "chat"
+	KindClassify = "classify"
+)
+
+// Call is one recorded model call: a chat call, with Request, or a classifier
+// call, with Input. Embedding calls are not recorded.
 type Call struct {
 	Seq         int64    `json:"seq"`
+	Kind        string   `json:"kind"`
 	Model       string   `json:"model"`
 	Fingerprint string   `json:"fingerprint"`
-	Request     Request  `json:"request"`
+	Request     *Request `json:"request,omitempty"`
+	Input       *Part    `json:"input,omitempty"`
 	Response    Response `json:"response"`
 	// ErrorKind is set when the call failed, and Response is then empty.
 	ErrorKind model.ErrorKind `json:"error_kind,omitempty"`
@@ -101,11 +112,19 @@ type Usage struct {
 	OutputTokens int64 `json:"output_tokens"`
 }
 
-// Response is a recorded chat response.
+// Label is a recorded classifier label.
+type Label struct {
+	Name       string  `json:"name"`
+	Confidence float64 `json:"confidence"`
+}
+
+// Response is a recorded response: content and tool calls for a chat call,
+// labels for a classifier call.
 type Response struct {
-	Content    string           `json:"content"`
+	Content    string           `json:"content,omitempty"`
 	ToolCalls  []ToolCall       `json:"tool_calls,omitempty"`
 	StopReason model.StopReason `json:"stop_reason,omitempty"`
+	Labels     []Label          `json:"labels,omitempty"`
 	Usage      *Usage           `json:"usage,omitempty"`
 }
 
@@ -124,13 +143,26 @@ type Event struct {
 	Failure  string `json:"failure,omitempty"`
 }
 
+func (r Response) usage() *model.Usage {
+	if r.Usage == nil {
+		return nil
+	}
+	return &model.Usage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
+}
+
+func (r Response) classify() model.ClassifyResponse {
+	out := model.ClassifyResponse{Usage: r.usage()}
+	for _, l := range r.Labels {
+		out.Labels = append(out.Labels, model.Label{Name: l.Name, Confidence: l.Confidence})
+	}
+	return out
+}
+
 func (r Response) model() model.ChatResponse {
 	out := model.ChatResponse{Content: r.Content, StopReason: r.StopReason}
 	for _, tc := range r.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, model.ToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
 	}
-	if r.Usage != nil {
-		out.Usage = &model.Usage{InputTokens: r.Usage.InputTokens, OutputTokens: r.Usage.OutputTokens}
-	}
+	out.Usage = r.usage()
 	return out
 }
