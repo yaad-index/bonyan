@@ -23,9 +23,21 @@ type Recorder struct {
 }
 
 // NewRecorder returns a recorder writing to sink. Every resolved value known to
-// scrub is removed from what is recorded; a nil scrub scrubs nothing.
-func NewRecorder(sink Sink, scrub *secret.Scrubber) *Recorder {
-	return &Recorder{sink: sink, red: redactor{full: sink.Full(), scrub: scrub}}
+// scrub is removed from what is recorded. Both rules are checked here rather
+// than left to the sink or the caller: a nil scrub is refused, since recording
+// without one would write resolved secrets to disk, and so is a full sink that
+// reports no subject, since its recordings could not be deleted by subject.
+func NewRecorder(sink Sink, scrub *secret.Scrubber) (*Recorder, error) {
+	if sink == nil {
+		return nil, errors.New("record: no sink")
+	}
+	if scrub == nil {
+		return nil, errors.New("record: a recorder needs the resolver's scrubber")
+	}
+	if sink.Full() && sink.Subject() == "" {
+		return nil, errors.New("record: a full recording needs a subject")
+	}
+	return &Recorder{sink: sink, red: redactor{full: sink.Full(), scrub: scrub}}, nil
 }
 
 // WriteFailures reports how many entries the sink failed to write. Recording
@@ -114,7 +126,7 @@ type redactor struct {
 }
 
 func (r redactor) text(s string) string {
-	if r.scrub == nil {
+	if r.scrub == nil { // only on replay, which writes nothing
 		return s
 	}
 	return r.scrub.Scrub(s)

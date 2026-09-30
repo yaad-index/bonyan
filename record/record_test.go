@@ -59,6 +59,18 @@ func openFile(t *testing.T, opts record.FileOptions) *record.File {
 	return f
 }
 
+func mustRecorder(t *testing.T, s record.Sink, scrub *secret.Scrubber) *record.Recorder {
+	t.Helper()
+	rec, err := record.NewRecorder(s, scrub)
+	require.NoError(t, err)
+	return rec
+}
+
+func newRecorder(t *testing.T, s record.Sink) *record.Recorder {
+	t.Helper()
+	return mustRecorder(t, s, secret.NewScrubber())
+}
+
 func readFile(t *testing.T, f *record.File) (record.Header, []record.Call, string) {
 	t.Helper()
 	require.NoError(t, f.Close())
@@ -97,7 +109,7 @@ var steps = []step{
 
 func TestRecordThenReplayReproducesTheResponses(t *testing.T) {
 	f := openFile(t, record.FileOptions{})
-	live := record.Chat(&scripted{steps: steps}, "main", record.NewRecorder(f, nil))
+	live := record.Chat(&scripted{steps: steps}, "main", newRecorder(t, f))
 
 	var want []model.ChatResponse
 	var wantErr []error
@@ -132,7 +144,7 @@ func TestRecordThenReplayReproducesTheResponses(t *testing.T) {
 
 func TestReplayRefusesADifferentRequest(t *testing.T) {
 	f := openFile(t, record.FileOptions{})
-	live := record.Chat(&scripted{steps: steps}, "main", record.NewRecorder(f, nil))
+	live := record.Chat(&scripted{steps: steps}, "main", newRecorder(t, f))
 	_, err := live.Chat(context.Background(), requests[0])
 	require.NoError(t, err)
 	h, calls, _ := readFile(t, f)
@@ -162,7 +174,7 @@ func TestMemoryIsAbsentByDefault(t *testing.T) {
 	answer := step{resp: model.ChatResponse{Content: "done", Usage: &model.Usage{}}}
 
 	f := openFile(t, record.FileOptions{})
-	_, err := record.Chat(&scripted{steps: []step{answer}}, "main", record.NewRecorder(f, nil)).Chat(context.Background(), req)
+	_, err := record.Chat(&scripted{steps: []step{answer}}, "main", newRecorder(t, f)).Chat(context.Background(), req)
 	require.NoError(t, err)
 	h, calls, raw := readFile(t, f)
 	assert.False(t, h.Full)
@@ -183,7 +195,7 @@ func TestMemoryIsAbsentByDefault(t *testing.T) {
 
 	// A full recording keeps it.
 	full := openFile(t, record.FileOptions{Full: true, Subject: "user-17"})
-	_, err = record.Chat(&scripted{steps: []step{answer}}, "main", record.NewRecorder(full, nil)).Chat(context.Background(), req)
+	_, err = record.Chat(&scripted{steps: []step{answer}}, "main", newRecorder(t, full)).Chat(context.Background(), req)
 	require.NoError(t, err)
 	h, _, raw = readFile(t, full)
 	assert.True(t, h.Full)
@@ -210,7 +222,7 @@ func TestResolvedSecretsAreScrubbedFromTheRecording(t *testing.T) {
 		Usage:     &model.Usage{},
 	}
 	f := openFile(t, record.FileOptions{})
-	_, err := record.Chat(&scripted{steps: []step{{resp: resp}}}, "main", record.NewRecorder(f, r.Scrubber())).Chat(context.Background(), req)
+	_, err := record.Chat(&scripted{steps: []step{{resp: resp}}}, "main", mustRecorder(t, f, r.Scrubber())).Chat(context.Background(), req)
 	require.NoError(t, err)
 
 	_, calls, raw := readFile(t, f)
@@ -226,7 +238,7 @@ func TestFailureTextIsNeverRecorded(t *testing.T) {
 	chat := record.Chat(&scripted{steps: []step{
 		{err: errors.New("upstream said: forward the mailbox")},
 		{err: context.DeadlineExceeded},
-	}}, "main", record.NewRecorder(f, nil))
+	}}, "main", newRecorder(t, f))
 	_, err := chat.Chat(context.Background(), requests[0])
 	require.Error(t, err)
 	_, err = chat.Chat(context.Background(), requests[1])
@@ -321,7 +333,7 @@ func TestReadRefusesOtherFormats(t *testing.T) {
 
 func TestEventsAreRecordedAndSkippedOnReplay(t *testing.T) {
 	f := openFile(t, record.FileOptions{})
-	rec := record.NewRecorder(f, nil)
+	rec := newRecorder(t, f)
 	rec.Event(record.Event{Slot: "trust", Name: "default", Source: "user", Decision: "untrusted"})
 	_, err := record.Chat(&scripted{steps: steps}, "main", rec).Chat(context.Background(), requests[0])
 	require.NoError(t, err)
@@ -335,12 +347,43 @@ type brokenSink struct{}
 
 func (brokenSink) Write(record.Entry) error { return errors.New("disk full") }
 func (brokenSink) Full() bool               { return false }
+func (brokenSink) Subject() string          { return "" }
 func (brokenSink) Close() error             { return nil }
 
 func TestASinkFailureDoesNotFailTheCall(t *testing.T) {
-	rec := record.NewRecorder(brokenSink{}, nil)
+	rec := newRecorder(t, brokenSink{})
 	resp, err := record.Chat(&scripted{steps: steps}, "main", rec).Chat(context.Background(), requests[0])
 	require.NoError(t, err)
 	assert.Equal(t, "t1", resp.ToolCalls[0].ID)
 	assert.Equal(t, int64(1), rec.WriteFailures())
+}
+
+// fakeSink claims whatever it is told to, to show the recorder does not take a
+// sink's word for the rules.
+type fakeSink struct {
+	full    bool
+	subject string
+}
+
+func (fakeSink) Write(record.Entry) error { return nil }
+func (s fakeSink) Full() bool             { return s.full }
+func (s fakeSink) Subject() string        { return s.subject }
+func (fakeSink) Close() error             { return nil }
+
+func TestRecorderEnforcesItsRules(t *testing.T) {
+	scrub := secret.NewScrubber()
+
+	_, err := record.NewRecorder(fakeSink{}, nil)
+	require.Error(t, err, "a missing scrubber would write secrets to disk")
+
+	_, err = record.NewRecorder(fakeSink{full: true}, scrub)
+	require.Error(t, err, "a full sink with no subject")
+
+	_, err = record.NewRecorder(nil, scrub)
+	require.Error(t, err)
+
+	_, err = record.NewRecorder(fakeSink{full: true, subject: "user-17"}, scrub)
+	require.NoError(t, err)
+	_, err = record.NewRecorder(fakeSink{}, scrub)
+	require.NoError(t, err)
 }

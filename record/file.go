@@ -22,6 +22,9 @@ type Sink interface {
 	// Full reports whether the sink is a full recording, which may hold
 	// recalled memory.
 	Full() bool
+	// Subject is who a full recording is about, so it can be deleted by
+	// subject. A full sink must report one; NewRecorder refuses it otherwise.
+	Subject() string
 	Close() error
 }
 
@@ -51,11 +54,12 @@ type FileOptions struct {
 // File writes one recording to a new file. Directories are created owner-only
 // (0700) and the file owner-only (0600). A file is never overwritten.
 type File struct {
-	mu   sync.Mutex
-	f    *os.File
-	enc  *json.Encoder
-	full bool
-	path string
+	mu      sync.Mutex
+	f       *os.File
+	enc     *json.Encoder
+	full    bool
+	subject string
+	path    string
 }
 
 // OpenFile creates a new recording file and writes its header.
@@ -96,7 +100,7 @@ func OpenFile(opts FileOptions) (*File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("record: %w", err)
 	}
-	s := &File{f: f, enc: json.NewEncoder(f), full: opts.Full, path: path}
+	s := &File{f: f, enc: json.NewEncoder(f), full: opts.Full, subject: opts.Subject, path: path}
 	if err := s.enc.Encode(Header{Format: Format, Version: Version, Full: opts.Full, Created: now}); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("record: %w", err)
@@ -109,6 +113,9 @@ func (s *File) Path() string { return s.path }
 
 // Full reports whether this is a full recording.
 func (s *File) Full() bool { return s.full }
+
+// Subject returns the subject of a full recording, and "" otherwise.
+func (s *File) Subject() string { return s.subject }
 
 // Write appends one entry.
 func (s *File) Write(e Entry) error {
