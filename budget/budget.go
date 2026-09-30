@@ -132,6 +132,11 @@ func (m *Meter) Admit(modelName string, inputBound int64, maxOutput int) error {
 // Charge adds what a call to modelName reported. Missing usage is
 // model.ErrMissingUsage. The usage is charged even when it crosses the
 // ceiling, and the crossing is reported as ErrExceeded.
+//
+// The tokens are charged whether or not the model is priced. For a model
+// missing from the price table the cost of the call is unknown and is not
+// charged, and Charge returns ErrUnpriced; Admit never admits such a model, so
+// this happens only to a call made without Admit.
 func (m *Meter) Charge(modelName string, u *model.Usage) error {
 	if u == nil {
 		return fmt.Errorf("%w: from %q", model.ErrMissingUsage, modelName)
@@ -139,17 +144,20 @@ func (m *Meter) Charge(modelName string, u *model.Usage) error {
 	if u.InputTokens < 0 || u.OutputTokens < 0 {
 		return fmt.Errorf("budget: negative usage reported by %q", modelName)
 	}
-	p, err := m.prices.Lookup(modelName)
-	if err != nil {
-		return err
-	}
 	tokens := satAdd(u.InputTokens, u.OutputTokens)
-	cost := satAdd(costMicros(u.InputTokens, p.Input), costMicros(u.OutputTokens, p.Output))
+	p, priceErr := m.prices.Lookup(modelName)
+	var cost int64
+	if priceErr == nil {
+		cost = satAdd(costMicros(u.InputTokens, p.Input), costMicros(u.OutputTokens, p.Output))
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tokens = satAdd(m.tokens, tokens)
 	m.cost = satAdd(m.cost, cost)
+	if priceErr != nil {
+		return priceErr
+	}
 	if m.tokens > m.maxTokens || m.cost > m.maxCost {
 		return fmt.Errorf("%w: spent %d of %d tokens and %d of %d cost", ErrExceeded, m.tokens, m.maxTokens, m.cost, m.maxCost)
 	}

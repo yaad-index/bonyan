@@ -100,6 +100,18 @@ func TestUnpricedModelIsRefusedNotFree(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorIs(t, m.Admit("unknown", 1, 1), budget.ErrUnpriced)
 	require.ErrorIs(t, m.Charge("unknown", &model.Usage{InputTokens: 1}), budget.ErrUnpriced)
+	tokens, cost := m.Spent()
+	assert.Equal(t, int64(1), tokens, "reported tokens count even when the model has no price")
+	assert.Zero(t, cost)
+
+	// Reported usage from an unpriced model still counts against the token
+	// ceiling, so nothing is admitted after it.
+	m, err = budget.NewMeter(10, 1_000_000, prices)
+	require.NoError(t, err)
+	require.ErrorIs(t, m.Charge("unknown", &model.Usage{InputTokens: 2_000_000}), budget.ErrUnpriced)
+	tokens, _ = m.Spent()
+	assert.Equal(t, int64(2_000_000), tokens)
+	require.ErrorIs(t, m.Admit("small", 0, 1), budget.ErrExceeded)
 
 	_, err = budget.PriceTable{"neg": {Input: -1}}.Lookup("neg")
 	require.Error(t, err)
