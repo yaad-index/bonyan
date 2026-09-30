@@ -428,6 +428,9 @@ func TestClassifierCallsAreRecordedAndReplayedInSequence(t *testing.T) {
 	_, err = replay.Classifier("gate").Classify(ctx, mail)
 	require.ErrorIs(t, err, record.ErrMismatch, "the first recorded call was a chat call")
 	assert.Contains(t, err.Error(), `call 1 was a chat call to "main", not a classify call to "gate"`)
+	_, err = replay.Classifier("main").Classify(ctx, mail)
+	require.ErrorIs(t, err, record.ErrMismatch, "same name, other kind")
+	assert.Contains(t, err.Error(), `call 1 was a chat call to "main", not a classify call to "main"`)
 	_, err = replay.Model("main").Chat(ctx, requests[0])
 	require.NoError(t, err)
 
