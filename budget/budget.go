@@ -164,6 +164,18 @@ func (m *Meter) Charge(modelName string, u *model.Usage) error {
 	return nil
 }
 
+// ChargeBound charges a failed call its bound: inputBound input tokens and
+// maxOutput output tokens at modelName's price. It is for a call that failed
+// after its request may have reached the provider and reported no usage (ADR
+// 0001 §11). As with Charge, the tokens are charged even for an unpriced model,
+// and crossing the ceiling is reported as ErrExceeded.
+func (m *Meter) ChargeBound(modelName string, inputBound int64, maxOutput int) error {
+	if inputBound < 0 || maxOutput < 0 {
+		return fmt.Errorf("budget: negative bound for %q", modelName)
+	}
+	return m.Charge(modelName, &model.Usage{InputTokens: inputBound, OutputTokens: int64(maxOutput)})
+}
+
 // Spent returns the tokens and cost charged so far.
 func (m *Meter) Spent() (tokens, costMicros int64) {
 	m.mu.Lock()

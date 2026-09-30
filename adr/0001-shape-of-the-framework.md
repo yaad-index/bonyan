@@ -327,11 +327,19 @@ Two other positions were considered and rejected:
   - **charging from reported usage:** what is spent is taken from the provider's reported usage after
     the call, never estimated. Crossing the ceiling ends the run with a typed error, recorded in the
     trace.
+  - **a failed call is charged its bound:** a call that fails after its request may have reached the
+    provider (a timeout mid-generation, a dropped connection, an error response) can be billed while
+    reporting no usage. It is charged its pre-call bound (input + max output) × price. Only a failure
+    the adapter shows happened before the request reached the provider (the connection was refused,
+    the name did not resolve) is not charged; when the adapter cannot tell, the call is charged.
+    *Why:* charging nothing would leave the budget unenforced for exactly the calls that fail, with
+    only the step limit bounding them, which is the case "missing usage is an error" rules out. The
+    cost is overcharging a failure that was not billed, which can only end a run early.
 - **Missing usage is an error in a budgeted run**, never counted as zero: some local servers report
   none, and treating that as zero would leave the budget silently unenforced.
 - Cost charged to a run is computed from reported provider usage and a price table in
-  configuration. The pre-call bound above is the only estimate, and it only ever refuses calls; it
-  never stands in for a charge.
+  configuration. The pre-call bound above is the only estimate. It refuses calls, and it stands in
+  for a charge only for a failed call that reported no usage, as above.
 
 ### 12. Hooks
 
@@ -409,4 +417,7 @@ attached in code.
 - §4: recall re-applies the configured trust policy; the stricter decision wins.
 - §7: untrusted means as classified by the policy; the approver is reached through the approval hook
   point, and the policy's handling can require approval.
+- §11: a call that fails after its request may have reached the provider is charged its pre-call
+  bound, unless the adapter shows the request never reached the provider; the bound, which before
+  only refused calls, stands in for a charge in that case.
 - §12: hooks, new.

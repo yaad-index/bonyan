@@ -25,7 +25,12 @@ const (
 type CallError struct {
 	Kind      ErrorKind
 	Retryable bool
-	Err       error
+	// NotSent is set by an adapter that knows the request never reached the
+	// endpoint (the connection was refused, the name did not resolve). The
+	// zero value means it may have been sent, so a budgeted run charges the
+	// call's bound (ADR 0001 §11); an adapter sets NotSent only when it is sure.
+	NotSent bool
+	Err     error
 }
 
 func (e *CallError) Error() string {
