@@ -1,6 +1,6 @@
 # ADR 0002: Stack, conventions and dependencies
 
-**Status:** Accepted (maintainer sign-off recorded by approval of the PR that sets this status)
+**Status:** Accepted, amended (maintainer sign-off recorded by approval of the PR that sets this status and of each PR that amends it; see Amendments)
 
 ## Context
 
@@ -51,10 +51,24 @@ Two packages are optional and heavy: the SQLite backend (25 modules), and the ex
 
 Deciding this before either package exists is deliberate. Moving a package between modules after release, in either direction, leaves two modules able to provide the same import path at some versions, which callers hit as ambiguous imports. The only move without that hazard is the one made before the first release.
 
+### 5. How a nested module is built, checked and released
+
+- **Building against the root.** A nested module requires the root module at the placeholder version `v0.0.0-00010101000000-000000000000` and replaces it with the repository's root directory (`replace github.com/yaad-index/bonyan => ../..` from `tokenize/tiktoken`). A replace directive applies only when the module is the main module, so no caller ever sees it. A `go.work` file was not used: `go mod tidy` ignores a workspace and resolves the root module at the version required, so with a workspace a change touching the root and a nested module could not be tidied until the root change was published.
+- **Releasing.** Because callers do see the requirement, a nested module is released only after a root release, and the pull request that prepares it first raises the requirement from the placeholder to that released root version. The release PR of a nested module is not merged while its `go.mod` still requires the placeholder.
+- **Tags.** The root keeps `vX.Y.Z`. A nested module is tagged `<path>/vX.Y.Z` (`tokenize/tiktoken/vX.Y.Z`), the form Go requires for a module in a subdirectory.
+- **release-please.** Each nested module is its own package in the release configuration, with its path as component, `/` as tag separator and its own changelog. The root package excludes the nested paths, so a change only inside a nested module does not bump the root. Each package gets its own release PR, so the root can be released on its own before a nested module. The resulting tag format is taken from the release-please documentation and is to be confirmed on the first release PR that includes a nested module, as the first root version is (see `RELEASING.md`).
+- **Checks.** There is still one verification target. `make check` in the root runs vet, build, the race tests, lint and the tidiness check in every nested module as well, from a list in the Makefile; formatting already walks the whole tree. CI runs that target, so a nested module is checked on every pull request.
+- **Dependency updates.** Each nested module has its own Dependabot entry.
+- **Adding a nested module** means adding it to the Makefile list, the release configuration and manifest, the Dependabot configuration and the CI cache paths.
+
 ## Consequences
 
 - The root module stays small: the three modules in section 2 and their dependencies.
-- Each nested module has its own `go.mod`, its own tags (`memory/sqlite/vX.Y.Z`, `tokenize/tiktoken/vX.Y.Z`), its own release-please package and its own `make check` run in CI. The phases that create them add those, not this ADR.
-- During development a nested module builds against the root in the same repository (for example through a `go.work` file); its releases require a released root version. The phase that creates the first nested module settles the mechanics.
+- Each nested module has its own `go.mod`, its own tags (`memory/sqlite/vX.Y.Z`, `tokenize/tiktoken/vX.Y.Z`) and its own release-please package, and the root `make check` covers it (section 5).
+- During development a nested module builds against the root in the same repository through a replace directive; its releases require a released root version, and each is a two-step release: the root first, then the nested module with its requirement raised (section 5).
 - A dependency added later that is load-bearing for the public API, or that adds substantially to the module graph, needs its own ADR or an amendment to this one.
 - Reversing this after release, in either direction, is a migration with the ambiguous-import hazard above, so it needs its own ADR.
+
+## Amendments
+
+- Section 5 was added, settling how nested modules are built against the root (a replace directive, not a workspace), released (after a root release, with the requirement raised first, from its own release PR), tagged, configured for release-please, checked (by the root `make check`, not a separate run) and kept up to date. The consequences about nested modules were updated to match.

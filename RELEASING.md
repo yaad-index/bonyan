@@ -55,3 +55,29 @@ access token or a GitHub App token with `contents: write` and
 edit): the release PR is then authored by that identity, `check` runs normally,
 and cutting a release becomes a plain CI-green + approvals merge with no
 close/reopen.
+
+## Nested modules
+
+Some packages are modules of their own, nested in this repository
+([ADR 0002](adr/0002-stack-and-dependencies.md), section 5). Today that is
+`tokenize/tiktoken`. Each is a separate package in `release-please-config.json`
+and gets its own release PR, tagged `<path>/vX.Y.Z` (for example
+`tokenize/tiktoken/v0.1.0`), the form Go requires for a module in a
+subdirectory. The root keeps `vX.Y.Z`, and a change only inside a nested module
+does not bump it.
+
+A nested module builds against the root in this repository through a `replace`
+directive, and requires the root at the placeholder version
+`v0.0.0-00010101000000-000000000000`. Callers ignore the `replace` but not the
+requirement, so releasing a nested module takes two steps:
+
+1. Release the root first, as above.
+2. Before merging the nested module's release PR, land a PR that raises its
+   requirement on `github.com/yaad-index/bonyan` from the placeholder to that
+   released root version. Do not merge a nested release PR while its `go.mod`
+   still requires the placeholder.
+
+Verify the tag on the first release PR that includes a nested module rather
+than trusting the config: its proposed tag must read `tokenize/tiktoken/vX.Y.Z`.
+The configuration follows the release-please documentation but has not been
+through a release yet.

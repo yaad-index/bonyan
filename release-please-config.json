@@ -1,8 +1,24 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
   "packages": {
     ".": {
       "release-type": "go",
+      "include-v-in-tag": true,
+      "include-component-in-tag": false,
+      "exclude-paths": [
+        "tokenize/tiktoken"
+      ],
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "initial-version": "0.1.0"
+    },
+    "tokenize/tiktoken": {
+      "release-type": "go",
+      "package-name": "tokenize/tiktoken",
+      "component": "tokenize/tiktoken",
+      "include-component-in-tag": true,
+      "tag-separator": "/",
       "include-v-in-tag": true,
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,

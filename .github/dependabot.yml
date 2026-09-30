@@ -1,7 +1,7 @@
 # Weekly dependency updates. Two ecosystems:
 #
-#   - gomod: Go module dependencies (go.mod / go.sum at the repo root, and the
-#     dev tools in tools/go.mod).
+#   - gomod: Go module dependencies (go.mod / go.sum at the repo root, the
+#     dev tools in tools/go.mod, and each nested module).
 #   - github-actions: the actions pinned by SHA in .github/workflows/.
 #     Bumps here are how the SHA-pinned actions get updated deliberately.
 #
@@ -23,6 +23,16 @@ updates:
   # The dev tools (formatters, linter), tracked in their own module.
   - package-ecosystem: gomod
     directory: "/tools"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # Each nested module (ADR 0002) has its own go.mod.
+  - package-ecosystem: gomod
+    directory: "/tokenize/tiktoken"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
