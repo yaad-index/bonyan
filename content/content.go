@@ -2,9 +2,11 @@
 // carries.
 //
 // Trusted text is written by the program or its operator: system instructions,
-// fixed templates. Untrusted text is anything else that reaches a model: mail,
-// web pages, feed items, uploads, tool output and memory recalled from any of
-// those. It always records where it came from.
+// fixed templates. Untrusted text is text from a source the trust policy
+// classifies as untrusted, and it always records where it came from. Under the
+// default policy that is everything else that reaches a model: mail, web pages,
+// feed items, uploads, tool output and memory recalled from any of those (see
+// package trust).
 //
 // The two are distinct types, and this package offers no way to turn Untrusted
 // into Trusted. Code that needs the characters of untrusted text reads them
