@@ -467,3 +467,31 @@ func TestClassifierInputFollowsTheRules(t *testing.T) {
 	assert.Equal(t, "token [REDACTED]", calls[0].Input.Text)
 	assert.True(t, calls[1].Input.Excluded)
 }
+
+// An assistant turn's tool calls are part of the recorded request, scrubbed,
+// and part of what replay matches on.
+func TestHistoryToolCallsAreRecorded(t *testing.T) {
+	t.Setenv("BONYAN_TEST_RECORD_HIST", "hist-secret-5")
+	r := secret.NewResolver(secret.Env{})
+	_, err := r.Scope("BONYAN_TEST_RECORD_HIST").Resolve(context.Background(), "BONYAN_TEST_RECORD_HIST")
+	require.NoError(t, err)
+
+	req := func(args string) model.ChatRequest {
+		return model.ChatRequest{Messages: []model.Message{
+			user("unlock it"),
+			{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "t1", Name: "unlock", Arguments: json.RawMessage(args)}}},
+			model.ToolResult("t1", "ok"),
+		}, MaxOutputTokens: 10}
+	}
+	f := openFile(t, record.FileOptions{})
+	_, err = record.Chat(&scripted{steps: []step{{resp: model.ChatResponse{Content: "done"}}}}, "main", mustRecorder(t, f, r.Scrubber())).
+		Chat(context.Background(), req(`{"code":"hist-secret-5"}`))
+	require.NoError(t, err)
+
+	h, calls, raw := readFile(t, f)
+	assert.NotContains(t, raw, "hist-secret-5")
+	assert.Equal(t, "unlock", calls[0].Request.Messages[1].ToolCalls[0].Name)
+
+	_, err = record.NewReplay(h, calls, r.Scrubber()).Model("main").Chat(context.Background(), req(`{"code":"other"}`))
+	require.ErrorIs(t, err, record.ErrMismatch, "different tool-call arguments in the history")
+}

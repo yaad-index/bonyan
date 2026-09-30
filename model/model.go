@@ -30,6 +30,9 @@ const (
 type Message struct {
 	Role  Role
 	Parts []content.Text
+	// ToolCalls are the calls a RoleAssistant message requested, so the turn
+	// can be sent back in the history that answers them.
+	ToolCalls []ToolCall
 	// ToolCallID links a RoleTool message to the call it answers.
 	ToolCallID string
 }

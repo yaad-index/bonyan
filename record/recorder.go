@@ -189,6 +189,9 @@ func (r redactor) request(req model.ChatRequest) Request {
 		for _, p := range m.Parts {
 			rm.Parts = append(rm.Parts, r.part(p))
 		}
+		for _, tc := range m.ToolCalls {
+			rm.ToolCalls = append(rm.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Name, Arguments: r.raw(tc.Arguments)})
+		}
 		out.Messages = append(out.Messages, rm)
 	}
 	for _, t := range req.Tools {
