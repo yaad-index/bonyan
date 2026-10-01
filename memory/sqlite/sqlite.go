@@ -122,8 +122,8 @@ func (b *Backend) History(ctx context.Context, subject, session string, since ti
 		subject, string(memory.ShortTerm), session, since.UnixNano())
 }
 
-// Recall returns the facts matching every word of query, best match first;
-// an empty query returns the newest facts.
+// Recall returns the facts matching any word of query, best match first; an
+// empty query returns the newest facts.
 func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, since time.Time) ([]memory.Record, error) {
 	match := matchQuery(query)
 	if match == "" {
@@ -137,9 +137,9 @@ func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, 
 		match, subject, string(memory.LongTerm), since.UnixNano(), limit)
 }
 
-// matchQuery turns query into a full-text query matching every word, each
-// quoted, so nothing in it is read as query syntax. Words with no letter or
-// digit are left out.
+// matchQuery turns query into a full-text query matching any of its words,
+// each quoted, so nothing in it is read as query syntax. Words with no letter
+// or digit are left out.
 func matchQuery(query string) string {
 	var terms []string
 	for _, w := range strings.Fields(query) {
@@ -148,7 +148,7 @@ func matchQuery(query string) string {
 		}
 		terms = append(terms, `"`+strings.ReplaceAll(w, `"`, `""`)+`"`)
 	}
-	return strings.Join(terms, " ")
+	return strings.Join(terms, " OR ")
 }
 
 func (b *Backend) query(ctx context.Context, q string, args ...any) ([]memory.Record, error) {

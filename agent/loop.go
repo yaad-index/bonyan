@@ -15,6 +15,7 @@ import (
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/hook"
+	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
@@ -117,7 +118,23 @@ type Agent struct {
 	// until the program decides them through it; nil holds none, so a
 	// pending answer cancels the action at once.
 	Approvals approval.Store
+	// Memory is the agent's memory (registry.Components.Memory); nil means
+	// none. At the start of a run the facts about Subject matching the user's
+	// message are recalled into the context, and the message is stored as an
+	// event of Session (ADR 0001 §4).
+	Memory *memory.Store
+	// Subject is who the run is about. It is required with Memory.
+	Subject string
+	// Session is the session the run belongs to; empty stores no event.
+	Session string
+	// MemoryLimit is how many facts are recalled; zero means
+	// DefaultMemoryLimit.
+	MemoryLimit int
 }
+
+// DefaultMemoryLimit is how many facts a run recalls when Agent.MemoryLimit is
+// zero.
+const DefaultMemoryLimit = 10
 
 // Output is the structured answer a run must give.
 type Output struct {
@@ -215,6 +232,12 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	if err := validHistory(a.History); err != nil {
 		return Outcome{}, Report{}, err
 	}
+	if a.Memory != nil && a.Subject == "" {
+		return Outcome{}, Report{}, errors.New("agent: memory needs a subject")
+	}
+	if a.MemoryLimit < 0 {
+		return Outcome{}, Report{}, errors.New("agent: the memory limit must not be negative")
+	}
 	if a.Output != nil && (a.Output.Schema.IsZero() || a.Output.Retries < 0) {
 		return Outcome{}, Report{}, errors.New("agent: an output needs a schema and zero or more retries")
 	}
@@ -281,6 +304,7 @@ type run struct {
 	// tool call from then on needs it.
 	approveAll      bool
 	approvalTimeout time.Duration
+	memory          []content.Text
 }
 
 // validHistory refuses history the pipeline cannot place.
@@ -310,6 +334,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 	if len(v.Changed) > 0 {
 		message = v.Event.Message
 	}
+	r.useMemory(ctx, input.Provenance(), textOf(message))
 	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{inSection(labelUser, message)}}}
 	var tools []model.ToolDef
 	if r.a.Tools != nil {
@@ -331,6 +356,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		}
 		req, dropped, err := assemble.Build(assemble.Input{
 			Instructions: r.a.Instructions,
+			Memory:       r.memory,
 			Material:     r.material,
 			Earlier:      r.history,
 			Current:      current,
@@ -528,6 +554,66 @@ func (r *run) classifyContext(ctx context.Context) {
 	for i, u := range r.a.Material {
 		r.material[i] = registry.Classify(ctx, r.policy, u)
 	}
+}
+
+// useMemory recalls the facts about the run's subject that match message
+// into the run's context, then stores message as an event of the session,
+// each through its hook point. A denial or a failing hook at either leaves
+// nothing recalled or nothing stored, and the run goes on; so does a failure
+// of the memory itself, which is recorded.
+func (r *run) useMemory(ctx context.Context, from content.Provenance, message string) {
+	if r.a.Memory == nil {
+		return
+	}
+	limit := r.a.MemoryLimit
+	if limit == 0 {
+		limit = DefaultMemoryLimit
+	}
+	recalled, err := r.a.Memory.Recall(ctx, r.a.Subject, message, limit)
+	if err != nil {
+		r.memoryFailed("recall")
+	} else if len(recalled) > 0 {
+		v := r.hooks.Run(ctx, hook.Event{Point: hook.MemoryRecall, Memory: recalled})
+		switch {
+		case v.Denied != "":
+		case len(v.Changed) > 0:
+			r.memory = v.Event.Memory
+		default:
+			r.memory = recalled
+		}
+	}
+	if r.a.Session == "" {
+		return
+	}
+	v := r.hooks.Run(ctx, hook.Event{Point: hook.MemoryWrite, Message: content.From(from, message)})
+	if v.Denied != "" {
+		return
+	}
+	if len(v.Changed) > 0 {
+		message = v.Event.Message.Raw()
+	}
+	if err := r.a.Memory.Append(ctx, r.a.Subject, r.a.Session, from.Kind, message); err != nil {
+		r.memoryFailed("write")
+	}
+}
+
+// memoryFailed records that memory failed at op. The error's text is not
+// recorded, since it can carry content.
+func (r *run) memoryFailed(op string) {
+	if r.a.Recorder != nil {
+		r.a.Recorder.Event(record.Event{Slot: "memory", Name: op, Failure: string(registry.FailError)})
+	}
+}
+
+// textOf is the text of a user message, trusted or not.
+func textOf(t content.Text) string {
+	switch v := t.(type) {
+	case content.Untrusted:
+		return v.Raw()
+	case content.Trusted:
+		return v.String()
+	}
+	return ""
 }
 
 // inSection returns t as a message part: untrusted text inside a section

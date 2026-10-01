@@ -425,6 +425,13 @@ func (h *Hooks) RecordApproval(name, decision string) {
 // scrubEvent returns ev with every resolved secret removed from its content.
 func scrubEvent(ev hook.Event, s *secret.Scrubber) hook.Event {
 	ev.Message = content.From(ev.Message.Provenance(), s.Scrub(ev.Message.Raw()))
+	if ev.Memory != nil {
+		mem := make([]content.Text, len(ev.Memory))
+		for i, t := range ev.Memory {
+			mem[i] = s.ScrubText(t)
+		}
+		ev.Memory = mem
+	}
 	if ev.Messages != nil {
 		msgs := make([]model.Message, len(ev.Messages))
 		for i, m := range ev.Messages {
@@ -602,6 +609,16 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			return Components{}, err
 		}
 		out.Memory, out.backend = store, backend
+		if cfg.Recording != nil && cfg.Recording.Impl == SinkFile {
+			dir, err := fileSinkDir(cfg.Recording.Options)
+			if err != nil {
+				_ = out.Close()
+				return Components{}, err
+			}
+			store.OnDeleteSubject("full recordings", func(_ context.Context, subject string) error {
+				return record.DeleteSubject(dir, subject)
+			})
+		}
 	}
 	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber(), rec: ev}
 	for point, list := range hooks {

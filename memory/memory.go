@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/yaad-index/bonyan/content"
@@ -68,8 +69,11 @@ type Backend interface {
 	// after since, oldest first.
 	History(ctx context.Context, subject, session string, since time.Time) ([]Record, error)
 	// Recall returns at most limit facts about subject written at or after
-	// since that match query, most relevant first. An empty query matches
-	// every fact.
+	// since that match query, most relevant first. A fact matches when it
+	// holds any word of the query; an empty query matches every fact. How
+	// well the matches are ranked is the backend's own: memory/sqlite ranks
+	// by bm25, which weighs rare words above common ones, while memory/inmem
+	// counts matched words, a reference rather than a recommendation.
 	Recall(ctx context.Context, subject, query string, limit int, since time.Time) ([]Record, error)
 	// DeleteSubject deletes every record of subject, events and facts alike.
 	DeleteSubject(ctx context.Context, subject string) error
@@ -102,6 +106,23 @@ type Store struct {
 	name      string
 	retention time.Duration
 	now       func() time.Time
+
+	mu       sync.Mutex
+	deleters []deleter
+}
+
+type deleter struct {
+	name string
+	del  func(ctx context.Context, subject string) error
+}
+
+// OnDeleteSubject adds del, under name, to what DeleteSubject deletes, for
+// what is kept about a subject outside memory, such as full recordings (ADR
+// 0001 §4).
+func (s *Store) OnDeleteSubject(name string, del func(ctx context.Context, subject string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleters = append(s.deleters, deleter{name: name, del: del})
 }
 
 // NewStore returns a Store over b.
@@ -183,12 +204,27 @@ func (s *Store) Recall(ctx context.Context, subject, query string, limit int) ([
 	return s.read(ctx, recs, LongTerm, subject, ""), nil
 }
 
-// DeleteSubject deletes every record of subject.
+// DeleteSubject deletes every record of subject, then everything added with
+// OnDeleteSubject. Each is tried even when another fails, and any failure is
+// returned naming what failed: a deletion is never reported as done when part
+// of it is not.
 func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
 	if subject == "" {
 		return fmt.Errorf("%w: empty subject", ErrInvalid)
 	}
-	return s.backend.DeleteSubject(ctx, subject)
+	var errs []error
+	if err := s.backend.DeleteSubject(ctx, subject); err != nil {
+		errs = append(errs, fmt.Errorf("memory: deleting the subject from the backend: %w", err))
+	}
+	s.mu.Lock()
+	dels := append([]deleter(nil), s.deleters...)
+	s.mu.Unlock()
+	for _, d := range dels {
+		if err := d.del(ctx, subject); err != nil {
+			errs = append(errs, fmt.Errorf("memory: deleting the subject from %s: %w", d.name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Purge deletes every record older than the retention period.

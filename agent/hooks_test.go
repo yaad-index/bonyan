@@ -445,7 +445,7 @@ func TestHooksNeverHoldASecret(t *testing.T) {
 }
 
 func TestAnInterceptorWhereItCannotActIsRefused(t *testing.T) {
-	for _, p := range []hook.Point{hook.RunStart, hook.RunEnd, hook.AfterModel, hook.Approval, hook.MemoryWrite, hook.MemoryRecall} {
+	for _, p := range []hook.Point{hook.RunStart, hook.RunEnd, hook.AfterModel, hook.Approval} {
 		t.Run(string(p), func(t *testing.T) {
 			r := registry.New()
 			require.NoError(t, r.RegisterChat("basic", func(json.RawMessage) (model.Chat, error) { return &scripted{steps: stepsOf(answer("x"))}, nil }))

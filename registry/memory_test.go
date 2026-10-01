@@ -3,6 +3,10 @@ package registry_test
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +16,9 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
+	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -88,4 +94,34 @@ func TestARegisteredMemoryBackendIsUsedAndClosed(t *testing.T) {
 
 	require.NoError(t, c.Close())
 	assert.True(t, b.closed)
+}
+
+// With file recordings configured, deleting a subject from memory also
+// deletes the subject's full recordings.
+func TestDeletingASubjectDeletesItsFullRecordings(t *testing.T) {
+	dir := t.TempDir()
+	full, err := record.OpenFile(record.FileOptions{Dir: dir, Full: true, Subject: "ana"})
+	require.NoError(t, err)
+	rec, err := record.NewRecorder(full, secret.NewScrubber())
+	require.NoError(t, err)
+	rec.Event(record.Event{Slot: "test", Name: "x"})
+	require.NoError(t, full.Close())
+	var recordings []string
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
+			recordings = append(recordings, path)
+		}
+		return err
+	}))
+	require.Len(t, recordings, 1, "the positive control: the full recording exists")
+
+	cfg := memoryConfig(registry.MemoryInMem, "720h")
+	opts, _ := json.Marshal(map[string]any{"dir": dir})
+	cfg.Recording = &registry.SlotConfig{Impl: registry.SinkFile, Options: opts}
+	c, err := newRegistry(t).Assemble(cfg)
+	require.NoError(t, err)
+	defer func() { _ = c.Close() }()
+	require.NoError(t, c.Memory.DeleteSubject(context.Background(), "ana"))
+	_, err = os.Stat(recordings[0])
+	assert.True(t, os.IsNotExist(err), "the full recording is gone")
 }

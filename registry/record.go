@@ -47,6 +47,20 @@ const (
 // options are {"dir": ..., "full": ..., "subject": ...}, as record.FileOptions.
 const SinkFile = "file"
 
+// fileSinkDir is the directory the file sink's options name; empty is the
+// default directory.
+func fileSinkDir(options json.RawMessage) (string, error) {
+	var o struct {
+		Dir string `json:"dir"`
+	}
+	if len(options) > 0 {
+		if err := json.Unmarshal(options, &o); err != nil {
+			return "", err
+		}
+	}
+	return o.Dir, nil
+}
+
 func fileSink(options json.RawMessage) (record.Sink, error) {
 	var o struct {
 		Dir     string `json:"dir"`
