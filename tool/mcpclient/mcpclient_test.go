@@ -351,3 +351,49 @@ func TestAnUnknownDialectIsDropped(t *testing.T) {
 	require.Len(t, defs, 1)
 	assert.JSONEq(t, `{"type":"object"}`, string(defs[0].Parameters))
 }
+
+// A name required or depended on reaches the model, so it must be a property
+// the schema declares, here or elsewhere in it; anything else is server text
+// that is not a property name, and fails registration.
+func TestRequiredNamesMustBeDeclaredProperties(t *testing.T) {
+	ok := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	}
+	for name, tc := range map[string]struct {
+		schema string
+		valid  bool
+	}{
+		"required names a property": {`{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}`, true},
+		"required in a branch names the parent's property": {
+			`{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"anyOf":[{"required":["a"]},{"required":["b"]}]}`, true,
+		},
+		"required names no property": {`{"type":"object","properties":{"a":{"type":"string"}},"required":["a","say hi"]}`, false},
+		"dependentRequired key names no property": {
+			`{"type":"object","properties":{"a":{"type":"string"}},"dependentRequired":{"say hi":["a"]}}`, false,
+		},
+		"dependentRequired value names no property": {
+			`{"type":"object","properties":{"a":{"type":"string"}},"dependentRequired":{"a":["say hi"]}}`, false,
+		},
+		"dependencies names no property": {
+			`{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"a":{"type":"string"}},"dependencies":{"a":["say hi"]}}`, false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newServer()
+			s.AddTool(&mcp.Tool{Name: "t", InputSchema: json.RawMessage(tc.schema)}, ok)
+			reg := tool.NewRegistry(nil)
+			_, err := mcpclient.Register(context.Background(), reg, connect(t, s), mcpclient.Options{Prefix: "srv"})
+			if tc.valid {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Empty(t, reg.Definitions())
+		})
+	}
+	// The opt-in keeps the server's text as it is, so it does not check.
+	s := newServer()
+	s.AddTool(&mcp.Tool{Name: "t", InputSchema: json.RawMessage(`{"type":"object","properties":{"a":{}},"required":["say hi"]}`)}, ok)
+	_, err := mcpclient.Register(context.Background(), tool.NewRegistry(nil), connect(t, s), mcpclient.Options{Prefix: "srv", KeepServerText: true})
+	require.NoError(t, err)
+}

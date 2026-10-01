@@ -9,6 +9,11 @@
 // enum and const values, patterns, formats and the names of the definitions a
 // reference points to. Descriptions, titles, examples, defaults, comments and
 // any keyword the server invents are dropped at every level.
+//
+// A name a schema requires, or makes another property depend on, must be a
+// property the schema declares somewhere, since it reaches the model as a
+// property name. A schema that requires a field it allows only through
+// additionalProperties, without declaring it, fails Register for that reason.
 package mcpclient
 
 import (

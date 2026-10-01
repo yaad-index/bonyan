@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -66,7 +67,7 @@ func keepValidation(schema json.RawMessage) (json.RawMessage, error) {
 	if err := json.Unmarshal(schema, &v); err != nil {
 		return nil, err
 	}
-	w := &walk{}
+	w := &walk{properties: map[string]bool{}}
 	if _, err := w.schema(v, root, true); err != nil {
 		return nil, err
 	}
@@ -83,6 +84,9 @@ func keepValidation(schema json.RawMessage) (json.RawMessage, error) {
 type walk struct {
 	keep bool
 	refs []ref
+	// properties holds every property name the schema declares, at any
+	// level, found on the first pass.
+	properties map[string]bool
 }
 
 type ref struct {
@@ -115,6 +119,13 @@ func (w *walk) schema(v any, base *url.URL, isRoot bool) (any, error) {
 			continue
 		}
 		if !w.keep {
+			if k == "properties" {
+				if props, ok := val.(map[string]any); ok {
+					for name := range props {
+						w.properties[name] = true
+					}
+				}
+			}
 			if k == "$ref" || k == "$dynamicRef" {
 				if s, ok := val.(string); ok {
 					u, err := base.Parse(s)
@@ -130,6 +141,11 @@ func (w *walk) schema(v any, base *url.URL, isRoot bool) (any, error) {
 				out[k] = val
 			}
 			continue
+		}
+		if w.keep {
+			if err := w.namesProperties(k, val); err != nil {
+				return nil, err
+			}
 		}
 		if kind == dialect {
 			if d, ok := val.(string); ok && w.keep && dialects[d] {
@@ -248,6 +264,36 @@ func (w *walk) list(val any, base *url.URL) (any, error) {
 		out[i] = kept
 	}
 	return out, nil
+}
+
+// namesProperties checks that every name required, or depended on, is a
+// property the schema declares somewhere. Such a name reaches the model, and
+// one naming no property would be text the server wrote that is not a property
+// name.
+func (w *walk) namesProperties(k string, val any) error {
+	var names []any
+	switch k {
+	case "required":
+		l, _ := val.([]any)
+		names = l
+	case "dependentRequired", "dependencies":
+		m, _ := val.(map[string]any)
+		for key, d := range m {
+			names = append(names, key)
+			if l, ok := d.([]any); ok {
+				names = append(names, l...)
+			}
+		}
+	default:
+		return nil
+	}
+	for _, n := range names {
+		s, ok := n.(string)
+		if !ok || !w.properties[s] {
+			return fmt.Errorf("%s names something that is not a declared property", k)
+		}
+	}
+	return nil
 }
 
 func withoutFragment(u *url.URL) *url.URL {
