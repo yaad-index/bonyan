@@ -12,6 +12,7 @@ import (
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/registry"
+	"github.com/yaad-index/bonyan/tool"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -84,7 +85,7 @@ func TestBonyansToolTextsStayUntrusted(t *testing.T) {
 	m := &scripted{steps: stepsOf(toolCall("missing", `{}`), answer("done"))}
 	a := newAgent(agent.Model{Name: "main", Chat: m})
 	a.Trust = trustAll{}
-	a.Tools = &tools{err: map[string]error{"missing": agent.ErrUnknownTool}}
+	a.Tools = &tools{err: map[string]error{"missing": tool.ErrUnknown}}
 	_, _, err := agent.Run(context.Background(), a, input("go"))
 	require.NoError(t, err)
 	assert.Equal(t, "error: unknown tool", mustItem(t, m.reqs[1].Messages[3].Parts[0]).Raw())
