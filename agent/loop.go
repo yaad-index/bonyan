@@ -13,6 +13,7 @@ import (
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/tokenize"
 	"github.com/yaad-index/bonyan/trust"
@@ -177,17 +178,19 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	return out, rep, nil
 }
 
-// defaultPolicy accepts no policy, the default one, or a wrapper reporting
-// that it was configured as the default, as the registry's does.
+// defaultPolicy accepts no policy, the default one, or the registry's wrapper
+// around the default one. The decision rests on the value, never on a name a
+// policy reports.
 func defaultPolicy(p trust.Policy) error {
-	switch p := p.(type) {
+	switch p.(type) {
 	case nil, trust.Default, *trust.Default:
 		return nil
-	case interface{ Name() string }:
-		if p.Name() == trust.DefaultName {
-			return nil
-		}
-		return fmt.Errorf("%w: got %q", ErrTrustPolicy, p.Name())
+	}
+	if registry.IsDefaultPolicy(p) {
+		return nil
+	}
+	if n, ok := p.(interface{ Name() string }); ok {
+		return fmt.Errorf("%w: got %q (%T)", ErrTrustPolicy, n.Name(), p)
 	}
 	return fmt.Errorf("%w: got %T", ErrTrustPolicy, p)
 }

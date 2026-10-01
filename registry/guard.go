@@ -55,6 +55,21 @@ func guardPolicy(name string, p trust.Policy, rec events) trust.Policy {
 // Name is the name the policy was configured under.
 func (g guardedPolicy) Name() string { return g.name }
 
+// IsDefaultPolicy reports whether p is the registry's wrapper around the
+// default policy. It decides on the wrapped value, not on a name, and a program
+// cannot construct the wrapper.
+func IsDefaultPolicy(p trust.Policy) bool {
+	g, ok := p.(guardedPolicy)
+	if !ok {
+		return false
+	}
+	switch g.inner.(type) {
+	case trust.Default, *trust.Default:
+		return true
+	}
+	return false
+}
+
 // Classify never returns an error: a failed classification is an untrusted one.
 func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) (trust.Decision, error) {
 	d, failure := call(ctx, func() (trust.Decision, error) { return g.inner.Classify(ctx, source) })

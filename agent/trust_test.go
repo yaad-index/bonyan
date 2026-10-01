@@ -23,6 +23,12 @@ func (trustAll) Classify(context.Context, content.Provenance) (trust.Decision, e
 	return trust.Decision{Verdict: trust.Trusted}, nil
 }
 
+// claimsDefault is a program's policy that reports the default policy's name
+// and still declares every source trusted.
+type claimsDefault struct{ trustAll }
+
+func (claimsDefault) Name() string { return trust.DefaultName }
+
 type nullSink struct{}
 
 func (nullSink) Write(record.Entry) error { return nil }
@@ -39,6 +45,7 @@ func assembled(t *testing.T, cfg *registry.SlotConfig) trust.Policy {
 		return &scripted{steps: stepsOf(answer("unused"))}, nil
 	}))
 	require.NoError(t, r.RegisterPolicy("program", func(json.RawMessage) (trust.Policy, error) { return trustAll{}, nil }))
+	require.NoError(t, r.RegisterPolicy("wraps-default", func(json.RawMessage) (trust.Policy, error) { return &trust.Default{}, nil }))
 	c, err := r.Assemble(registry.Config{Chat: registry.SlotConfig{Impl: "basic"}, Trust: cfg}, registry.WithSink(nullSink{}))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
@@ -47,10 +54,13 @@ func assembled(t *testing.T, cfg *registry.SlotConfig) trust.Policy {
 
 func TestTheDefaultTrustPolicyRuns(t *testing.T) {
 	for name, policy := range map[string]func(*testing.T) trust.Policy{
-		"none":                    func(*testing.T) trust.Policy { return nil },
-		"default value":           func(*testing.T) trust.Policy { return trust.Default{} },
-		"default pointer":         func(*testing.T) trust.Policy { return &trust.Default{} },
-		"registry, unconfigured":  func(t *testing.T) trust.Policy { return assembled(t, nil) },
+		"none":                   func(*testing.T) trust.Policy { return nil },
+		"default value":          func(*testing.T) trust.Policy { return trust.Default{} },
+		"default pointer":        func(*testing.T) trust.Policy { return &trust.Default{} },
+		"registry, unconfigured": func(t *testing.T) trust.Policy { return assembled(t, nil) },
+		"registry, default value under another name": func(t *testing.T) trust.Policy {
+			return assembled(t, &registry.SlotConfig{Impl: "wraps-default"})
+		},
 		"registry, named default": func(t *testing.T) trust.Policy { return assembled(t, &registry.SlotConfig{Impl: trust.DefaultName}) },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -70,8 +80,9 @@ func TestAnotherTrustPolicyIsRefused(t *testing.T) {
 		policy func(*testing.T) trust.Policy
 		names  string
 	}{
-		"program policy":       {func(*testing.T) trust.Policy { return trustAll{} }, "agent_test.trustAll"},
-		"registry, configured": {func(t *testing.T) trust.Policy { return assembled(t, &registry.SlotConfig{Impl: "program"}) }, `"program"`},
+		"program policy":               {func(*testing.T) trust.Policy { return trustAll{} }, "agent_test.trustAll"},
+		"program policy named default": {func(*testing.T) trust.Policy { return claimsDefault{} }, "agent_test.claimsDefault"},
+		"registry, configured":         {func(t *testing.T) trust.Policy { return assembled(t, &registry.SlotConfig{Impl: "program"}) }, `"program"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := &scripted{steps: stepsOf(answer("done"))}
