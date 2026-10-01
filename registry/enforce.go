@@ -204,13 +204,26 @@ func delimits(s content.Section, m trust.Marking, texts []string) (text string, 
 			text, ok = "", false
 		}
 	}()
-	text, err := s.Compose(m.Open, m.Close, m.Header)
+	if m.Header == nil {
+		return "", false
+	}
+	// Header is called once per source, so the line checked is the line sent.
+	headers := map[content.Provenance]string{}
+	header := func(p content.Provenance) string {
+		h, ok := headers[p]
+		if !ok {
+			h = m.Header(p)
+			headers[p] = h
+		}
+		return h
+	}
+	text, err := s.Compose(m.Open, m.Close, header)
 	if err != nil {
 		return "", false
 	}
 	lines := []string{m.Open, m.Close}
 	for _, it := range s.Items() {
-		lines = append(lines, m.Header(it.Provenance()))
+		lines = append(lines, header(it.Provenance()))
 	}
 	for _, line := range lines {
 		for _, t := range texts {

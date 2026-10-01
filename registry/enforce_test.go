@@ -3,6 +3,7 @@ package registry_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -274,4 +275,24 @@ func TestADroppedMemoryItemIsRecordedWithoutItsID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []record.Event{{Slot: registry.SlotTrust, Name: "program", Decision: registry.DecisionDropped, Source: "memory"}}, ev.got)
 	assert.Equal(t, "fact-7", h.seen[0][0].Source.ID, "the handler itself still sees the source")
+}
+
+// A Header is called once per source, so a header that changes between calls
+// cannot be checked as one string and sent as another.
+func TestAHeaderIsCheckedAsItIsSent(t *testing.T) {
+	n := 0
+	p := &policy{mark: func(string) (trust.Marking, error) {
+		return trust.Marking{Open: "<m>", Close: "</m>", Header: func(content.Provenance) string {
+			n++
+			return fmt.Sprintf("#h%d", n)
+		}}, nil
+	}}
+	rec, ev := recorder(t)
+	sec := content.NewSection("material", fetched("d", "carries #h1 inside"))
+	out, err := registry.Enforce(context.Background(), registry.GuardPolicy(markingPolicy{p}, rec), request(sec))
+	require.NoError(t, err)
+	open, _, _ := content.DefaultMarking("material", content.Nonce(sec))
+	assert.True(t, strings.HasPrefix(marked(t, out, 1, 0).Text(), open), "the header the item carries is refused")
+	assert.Len(t, ev.got, 1)
+	assert.Equal(t, 1, n, "called once for the one source")
 }
