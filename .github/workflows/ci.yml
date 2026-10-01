@@ -26,11 +26,12 @@ jobs:
           # lockstep.
           go-version-file: go.mod
           # Key the module and build cache on every module's go.sum: building
-          # the linter dominates a cold run, and the nested module's
+          # the linter dominates a cold run, and the nested modules'
           # dependencies are large.
           cache-dependency-path: |
             tools/go.sum
             go.sum
+            memory/sqlite/go.sum
             tokenize/tiktoken/go.sum
 
       - name: Check
