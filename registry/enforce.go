@@ -40,13 +40,13 @@ func GuardPolicy(p trust.Policy, rec *record.Recorder) trust.Policy {
 }
 
 // Classify applies p to u where it enters a run and builds the typed value
-// from the decision: trusted text when the policy declares the source trusted,
-// u unchanged otherwise. p must come from GuardPolicy or Assemble, which never
+// from the decision: trusted text keeping u's provenance when the policy
+// declares the source trusted, u unchanged otherwise. p must come from GuardPolicy or Assemble, which never
 // return an error and fail closed.
 func Classify(ctx context.Context, p trust.Policy, u content.Untrusted) content.Text {
 	d, err := p.Classify(ctx, u.Provenance())
 	if err == nil && d.Verdict == trust.Trusted {
-		return content.Instruction(u.Raw())
+		return content.TrustedFrom(u.Provenance(), u.Raw())
 	}
 	return u
 }

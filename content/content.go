@@ -35,13 +35,25 @@ type Text interface {
 	sealed()
 }
 
-// Trusted is text the program or its operator wrote.
+// Trusted is text the program or its operator wrote, or text from a source
+// the trust policy declared trusted. The second keeps where it came from.
 type Trusted struct {
-	s string
+	s    string
+	from Provenance
 }
 
 // Instruction returns program-authored text as Trusted.
 func Instruction(s string) Trusted { return Trusted{s: s} }
+
+// TrustedFrom returns text the trust policy declared trusted, keeping its
+// provenance, so that what came from memory can still be told apart from what
+// the program wrote. Only the code applying a policy's decision should call
+// it.
+func TrustedFrom(from Provenance, s string) Trusted { return Trusted{s: s, from: from} }
+
+// Provenance is where the text came from; it is zero for text the program
+// wrote.
+func (t Trusted) Provenance() Provenance { return t.from }
 
 // String returns the text.
 func (t Trusted) String() string { return t.s }

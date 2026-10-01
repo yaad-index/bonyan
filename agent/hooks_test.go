@@ -544,3 +544,50 @@ func TestATrustedPartKeptInItsRoleIsAllowed(t *testing.T) {
 	assert.Empty(t, v.Denied)
 	assert.Equal(t, []string{"keep"}, v.Changed)
 }
+
+// A change may not pass trusted memory off as the program's own text, even
+// with the same words: the trusted part is matched with its provenance.
+func TestAChangeThatDropsTrustedMemorysProvenanceIsADenial(t *testing.T) {
+	const fact = "prefers mail"
+	m := &scripted{steps: stepsOf(answer("done"))}
+	sink := &eventSink{}
+	a := newAgent(agent.Model{Name: "main", Chat: m})
+	a.Trust = trustAll{}
+	a.Material = []content.Untrusted{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, fact)}
+	withHooks(t, &a, sink, map[hook.Point][]string{hook.BeforeModel: {"launder"}}, map[string]hook.Hook{
+		"launder": &interceptor{f: func(ev hook.Event) (hook.Action, error) {
+			msgs := append([]model.Message(nil), ev.Messages...)
+			for i, msg := range msgs {
+				parts := append([]content.Text(nil), msg.Parts...)
+				for j, p := range parts {
+					if tr, ok := p.(content.Trusted); ok && tr.Provenance().Kind == content.KindMemory {
+						parts[j] = content.Instruction(tr.String())
+					}
+				}
+				msgs[i].Parts = parts
+			}
+			return hook.Action{Messages: msgs}, nil
+		}},
+	})
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonDenied, out.Reason())
+}
+
+// The positive control: resending trusted memory as it was is no change of
+// trust and goes through.
+func TestAChangeThatKeepsTrustedMemoryAsItWasIsAllowed(t *testing.T) {
+	m := &scripted{steps: stepsOf(answer("done"))}
+	sink := &eventSink{}
+	a := newAgent(agent.Model{Name: "main", Chat: m})
+	a.Trust = trustAll{}
+	a.Material = []content.Untrusted{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, "prefers mail")}
+	withHooks(t, &a, sink, map[hook.Point][]string{hook.BeforeModel: {"resend"}}, map[string]hook.Hook{
+		"resend": &interceptor{f: func(ev hook.Event) (hook.Action, error) {
+			return hook.Action{Messages: append([]model.Message(nil), ev.Messages...)}, nil
+		}},
+	})
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.True(t, out.Cleared())
+}

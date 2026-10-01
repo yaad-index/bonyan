@@ -134,6 +134,12 @@ func TestResolvedValueIsScrubbedFromToolOutput(t *testing.T) {
 	tr, ok := r.Scrubber().ScrubText(content.Instruction("use key-9f8e7d")).(content.Trusted)
 	require.True(t, ok, "trusted text stays trusted")
 	assert.Equal(t, "use [REDACTED]", tr.String())
+
+	mem := content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}
+	tr, ok = r.Scrubber().ScrubText(content.TrustedFrom(mem, "use key-9f8e7d")).(content.Trusted)
+	require.True(t, ok)
+	assert.Equal(t, "use [REDACTED]", tr.String())
+	assert.Equal(t, mem, tr.Provenance(), "scrubbing keeps where trusted text came from")
 }
 
 type stringer struct{ s string }

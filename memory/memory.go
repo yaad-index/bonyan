@@ -212,7 +212,7 @@ func (s *Store) read(ctx context.Context, recs []Record, layer Layer, subject, s
 		// recall's decision is made and recorded.
 		now := s.classify(ctx, r.Origin)
 		if r.Decision.Verdict == trust.Trusted && now == trust.Trusted {
-			out = append(out, content.Instruction(r.Text))
+			out = append(out, content.TrustedFrom(content.Provenance{Kind: content.KindMemory, Origin: r.Origin, ID: r.ID}, r.Text))
 			continue
 		}
 		out = append(out, content.From(content.Provenance{Kind: content.KindMemory, Origin: r.Origin, ID: r.ID}, r.Text))

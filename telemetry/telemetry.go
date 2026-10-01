@@ -295,7 +295,8 @@ func captureResponse(resp model.ChatResponse, scrub func(string) string) attribu
 	return keyOutputMessages.String(marshal([]message{{Role: string(model.RoleAssistant), Parts: parts, FinishReason: string(resp.StopReason)}}))
 }
 
-// texts is the text of each part, with every memory item left out.
+// texts is the text of each part, with every memory item left out, trusted or
+// not.
 func texts(parts []content.Text) []string {
 	var out []string
 	untrusted := func(items []content.Untrusted) {
@@ -308,7 +309,9 @@ func texts(parts []content.Text) []string {
 	for _, p := range parts {
 		switch v := p.(type) {
 		case content.Trusted:
-			out = append(out, v.String())
+			if v.Provenance().Kind != content.KindMemory {
+				out = append(out, v.String())
+			}
 		case content.Marked:
 			untrusted(v.Section().Items())
 		case content.Section:

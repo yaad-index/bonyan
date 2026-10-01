@@ -342,3 +342,16 @@ func TestNoTelemetryIsNoOp(t *testing.T) {
 	assert.True(t, out.Cleared())
 	assert.Nil(t, a.Telemetry)
 }
+
+// Memory the policy declared trusted is still memory, and capture still
+// leaves it out.
+func TestCapturedContentLeavesOutTrustedMemory(t *testing.T) {
+	const trustedFact = "TRUSTED-MEMORY-7f3"
+	a := contentRun(t)
+	a.Trust = trustAll{}
+	a.Material = append(a.Material, content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, trustedFact))
+	all := observe(t, a, telemetry.Options{CaptureContent: true}, input(textInput)).everything()
+	assert.Contains(t, all, textMaterial, "trusted material that is not memory is captured")
+	assert.NotContains(t, all, trustedFact)
+	assert.NotContains(t, all, textMemory)
+}
