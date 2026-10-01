@@ -39,6 +39,9 @@ type Spec struct {
 	Secrets    []string
 	Network    bool
 	Filesystem bool
+	// NeedsApproval makes every call of the tool wait for approval before it
+	// runs (ADR 0001 §7).
+	NeedsApproval bool
 }
 
 // Func is a tool's implementation. secrets resolves only the names in its Spec.
@@ -138,7 +141,7 @@ func RegisterSchema(r *Registry, name string, spec Spec, schema Schema, fn RawFu
 
 // registerRemote adds a tool served by a tool server: its results are remote
 // tool output, it resolves no secrets and it may reach the network.
-func registerRemote(reg any, name, description string, schema json.RawMessage, call remote.Call) error {
+func registerRemote(reg any, name, description string, schema json.RawMessage, needsApproval bool, call remote.Call) error {
 	r, ok := reg.(*Registry)
 	if !ok || r == nil {
 		return errors.New("tool: not a registry")
@@ -153,7 +156,7 @@ func registerRemote(reg any, name, description string, schema json.RawMessage, c
 	if err != nil {
 		return fmt.Errorf("tool %q: %w", name, err)
 	}
-	spec := Spec{Description: description, Network: true}
+	spec := Spec{Description: description, Network: true, NeedsApproval: needsApproval}
 	return r.add(name, &entry{
 		def:    model.ToolDef{Name: name, Description: description, Parameters: s.JSON()},
 		spec:   spec,
@@ -208,6 +211,15 @@ func (r *Registry) Source(name string) content.Kind {
 		return e.source
 	}
 	return content.KindTool
+}
+
+// NeedsApproval reports whether the tool registered under name needs approval
+// before each call.
+func (r *Registry) NeedsApproval(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.tools[name]
+	return ok && e.spec.NeedsApproval
 }
 
 // Call validates the call's arguments against the tool's input schema and runs

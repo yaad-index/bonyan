@@ -58,9 +58,16 @@ func Classify(ctx context.Context, p trust.Policy, u content.Untrusted) content.
 // marks every section, with the default marking when the policy's own cannot
 // be used. p must come from GuardPolicy or Assemble.
 func Enforce(ctx context.Context, p trust.Policy, req model.ChatRequest) (model.ChatRequest, error) {
+	out, _, err := EnforceRequest(ctx, p, req)
+	return out, err
+}
+
+// EnforceRequest is Enforce, also reporting whether the policy's handling
+// required approval for the run's tool calls from here on.
+func EnforceRequest(ctx context.Context, p trust.Policy, req model.ChatRequest) (model.ChatRequest, bool, error) {
 	g, ok := p.(guardedPolicy)
 	if !ok {
-		return model.ChatRequest{}, fmt.Errorf("registry: enforce needs a guarded policy, got %T", p)
+		return model.ChatRequest{}, false, fmt.Errorf("registry: enforce needs a guarded policy, got %T", p)
 	}
 	var items []trust.Item
 	for _, m := range req.Messages {
@@ -69,24 +76,25 @@ func Enforce(ctx context.Context, p trust.Policy, req model.ChatRequest) (model.
 			case content.Trusted:
 			case content.Section:
 				if m.Role == model.RoleSystem {
-					return model.ChatRequest{}, fmt.Errorf("%w: a %q section in the system message", ErrPlacement, v.Label())
+					return model.ChatRequest{}, false, fmt.Errorf("%w: a %q section in the system message", ErrPlacement, v.Label())
 				}
 				for _, it := range v.Items() {
 					items = append(items, trust.Item{Section: v.Label(), Index: len(items), Source: it.Provenance(), Bytes: len(it.Raw())})
 				}
 			default:
-				return model.ChatRequest{}, fmt.Errorf("%w: a %T part in a %s message", ErrPlacement, part, m.Role)
+				return model.ChatRequest{}, false, fmt.Errorf("%w: a %T part in a %s message", ErrPlacement, part, m.Role)
 			}
 		}
 	}
 
 	var drop []int
+	var approve bool
 	if len(items) > 0 {
 		h := g.handle(ctx, items)
 		if h.Refuse {
-			return model.ChatRequest{}, ErrRefused
+			return model.ChatRequest{}, false, ErrRefused
 		}
-		drop = h.Drop
+		drop, approve = h.Drop, h.RequireApproval
 	}
 
 	// Drop what the handling dropped, then mark every section under one nonce
@@ -133,7 +141,7 @@ func Enforce(ctx context.Context, p trust.Policy, req model.ChatRequest) (model.
 		}
 		out.Messages[i] = m
 	}
-	return out, nil
+	return out, approve, nil
 }
 
 // handle asks the policy's Handler, if it has one. A failure, or a drop of an
@@ -158,6 +166,9 @@ func (g guardedPolicy) handle(ctx context.Context, items []trust.Item) trust.Han
 	case got.Refuse:
 		g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionRefused})
 	default:
+		if got.RequireApproval {
+			g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionApprovalNeeded})
+		}
 		for _, i := range got.Drop {
 			ev := record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionDropped, Source: string(items[i].Source.Kind), Item: items[i].Source.ID}
 			if items[i].Source.Kind == content.KindMemory {

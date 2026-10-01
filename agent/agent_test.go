@@ -28,7 +28,7 @@ func TestAnsweredIsTheOnlyClearedOutcome(t *testing.T) {
 	for _, r := range []agent.Reason{
 		agent.ReasonModelFailed, agent.ReasonInvalidOutput, agent.ReasonStepLimit,
 		agent.ReasonBudgetLimit, agent.ReasonDeadline, agent.ReasonFallbackExhausted,
-		agent.ReasonLoopDetected, agent.ReasonApproverTimeout,
+		agent.ReasonLoopDetected, agent.ReasonNotApproved,
 	} {
 		o := agent.NotCleared(r)
 		assert.False(t, o.Cleared(), "reason %s", r)

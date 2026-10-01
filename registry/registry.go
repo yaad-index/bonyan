@@ -338,6 +338,7 @@ func (c Components) Close() error {
 type Hooks struct {
 	byPoint map[hook.Point][]guardedHook
 	scrub   *secret.Scrubber
+	rec     events
 }
 
 // Run calls the hooks attached to ev.Point in their configured order. ev is
@@ -361,6 +362,64 @@ func (h *Hooks) Run(ctx context.Context, ev hook.Event) hook.Verdict {
 		}
 	}
 	return v
+}
+
+// ApprovalVerdict is what the hooks at the approval point decided.
+type ApprovalVerdict struct {
+	Answer hook.Answer
+	// By names the hook behind the answer: the one that approved, rejected
+	// or said pending. It is empty when no hook decided.
+	By string
+}
+
+// Approve runs the hooks at the approval point (ADR 0001 §12). Each approver
+// answers in order, and the first rejection, or failure, ends the point. When
+// none rejected and one said pending, the action is pending, whatever the
+// others answered: a pending approver may still reject, so an approval alone
+// does not let the action through, and the decision made later through the
+// approval store answers for every approver that said pending. Otherwise the
+// action is approved when an approver approved it, and undecided, answered
+// Abstain, which cancels it. An observing hook only observes. Every outcome
+// but a pending one is recorded here; a pending action's outcome is recorded
+// with RecordApproval when it is decided.
+func (h *Hooks) Approve(ctx context.Context, ev hook.Event) ApprovalVerdict {
+	ev.Point = hook.Approval
+	var approved, pending string
+	if h != nil {
+		ev = scrubEvent(ev, h.scrub)
+		for _, g := range h.byPoint[hook.Approval] {
+			switch g.answer(ctx, ev) {
+			case hook.Reject:
+				return ApprovalVerdict{Answer: hook.Reject, By: g.name}
+			case hook.Approve:
+				if approved == "" {
+					approved = g.name
+				}
+			case hook.Pending:
+				if pending == "" {
+					pending = g.name
+				}
+			}
+		}
+	}
+	switch {
+	case pending != "":
+		return ApprovalVerdict{Answer: hook.Pending, By: pending}
+	case approved != "":
+		h.RecordApproval(approved, DecisionApproved)
+		return ApprovalVerdict{Answer: hook.Approve, By: approved}
+	}
+	h.RecordApproval("", DecisionCancelled)
+	return ApprovalVerdict{Answer: hook.Abstain}
+}
+
+// RecordApproval records an outcome at the approval point, with the hook that
+// decided it, or none.
+func (h *Hooks) RecordApproval(name, decision string) {
+	if h == nil || h.rec == nil {
+		return
+	}
+	h.rec.Event(record.Event{Slot: SlotHook, Name: name, Point: string(hook.Approval), Decision: decision})
 }
 
 // scrubEvent returns ev with every resolved secret removed from its content.
@@ -472,6 +531,9 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			if _, ok := h.(hook.Interceptor); ok && hook.Rights(point) == 0 {
 				return Components{}, fmt.Errorf("%w: hook %q may change or deny, and %q allows neither", ErrHookPoint, hc.Impl, point)
 			}
+			if _, ok := h.(hook.Approver); ok && point != hook.Approval {
+				return Components{}, fmt.Errorf("%w: hook %q answers approvals, and %q is not the approval point", ErrHookPoint, hc.Impl, point)
+			}
 			hooks[point] = append(hooks[point], attached{name: hc.Impl, h: h})
 		}
 	}
@@ -541,7 +603,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		}
 		out.Memory, out.backend = store, backend
 	}
-	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber()}
+	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber(), rec: ev}
 	for point, list := range hooks {
 		for _, x := range list {
 			out.Hooks.byPoint[point] = append(out.Hooks.byPoint[point], guardedHook{name: x.name, inner: x.h, rec: ev, scrub: out.Hooks.scrub})

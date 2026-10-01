@@ -20,6 +20,9 @@ type Limits struct {
 	MaxSteps int
 	Deadline time.Duration
 	Budget   Budget
+	// ApprovalTimeout bounds how long an action whose approval is pending
+	// waits for a decision. Zero leaves only the run's deadline to bound it.
+	ApprovalTimeout time.Duration
 }
 
 // DefaultLimits returns the limits a run gets when the program sets none.
@@ -46,6 +49,9 @@ func (l Limits) Validate() error {
 	}
 	if l.Deadline <= 0 {
 		errs = append(errs, fmt.Errorf("deadline must be positive, got %s", l.Deadline))
+	}
+	if l.ApprovalTimeout < 0 {
+		errs = append(errs, fmt.Errorf("approval timeout must not be negative, got %s", l.ApprovalTimeout))
 	}
 	if l.Budget.MaxTokens <= 0 {
 		errs = append(errs, fmt.Errorf("token budget must be positive, got %d", l.Budget.MaxTokens))

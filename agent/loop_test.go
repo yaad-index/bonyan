@@ -74,6 +74,7 @@ type tools struct {
 	out    map[string]string
 	err    map[string]error
 	remote map[string]bool
+	needs  map[string]bool
 }
 
 func (t *tools) Definitions() []model.ToolDef {
@@ -92,6 +93,8 @@ func (t *tools) Call(_ context.Context, tc model.ToolCall) (string, error) {
 	}
 	return "", tool.ErrUnknown
 }
+
+func (t *tools) NeedsApproval(name string) bool { return t.needs[name] }
 
 func (t *tools) Source(name string) content.Kind {
 	if t.remote[name] {

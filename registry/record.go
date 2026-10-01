@@ -26,10 +26,20 @@ const (
 	DecisionDenied  = "denied"
 )
 
+// The outcomes recorded at the approval point (ADR 0001 §12): with the hook
+// that decided, or, for an action cancelled because no hook decided, with no
+// hook named.
+const (
+	DecisionApproved  = "approved"
+	DecisionTimedOut  = "timed out"
+	DecisionCancelled = "cancelled"
+)
+
 // The decisions recorded at the trust enforcement point.
 const (
 	DecisionRefused        = "refused"
 	DecisionDropped        = "dropped"
+	DecisionApprovalNeeded = "approval required"
 	DecisionDefaultMarking = "default marking"
 )
 
