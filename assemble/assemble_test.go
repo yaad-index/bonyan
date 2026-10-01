@@ -206,6 +206,21 @@ func TestMemoryAndMaterialDropFromTheEnd(t *testing.T) {
 	assert.Len(t, req.Messages, 1, "no context message when every item is dropped")
 	require.Len(t, dropped, 1)
 	assert.Equal(t, content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, dropped[0].Source, "a memory item's ID is never reported")
+
+	// Nor when memory sits in another section, or the policy trusted it; a
+	// trusted item's source is reported like an untrusted one's.
+	b = roomy
+	b.Material = 1
+	memProv := content.Provenance{Kind: content.KindMemory, Origin: content.KindUser, ID: "fact-8"}
+	fetched := content.Provenance{Kind: content.KindFetched, ID: "d9"}
+	_, dropped, err = assemble.Build(assemble.Input{Material: []content.Text{
+		content.From(memProv, "a fact"), content.TrustedFrom(memProv, "a trusted fact"), content.TrustedFrom(fetched, "a trusted page"),
+	}}, b, counter)
+	require.NoError(t, err)
+	require.Len(t, dropped, 3)
+	assert.Equal(t, content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, dropped[0].Source)
+	assert.Equal(t, content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, dropped[1].Source)
+	assert.Equal(t, fetched, dropped[2].Source)
 }
 
 // Earlier history is dropped oldest first, a whole exchange at a time, and

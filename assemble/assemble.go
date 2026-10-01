@@ -260,10 +260,14 @@ func trimItems(c tokenize.Counter, section string, items []content.Text, budget 
 			return nil, nil, err
 		}
 		var src content.Provenance
-		if u, ok := items[i].(content.Untrusted); ok {
-			src = u.Provenance()
+		switch v := items[i].(type) {
+		case content.Untrusted:
+			src = v.Provenance()
+		case content.Trusted:
+			src = v.Provenance()
 		}
-		if section == SectionMemory {
+		// A memory item's ID is never reported, whichever section held it.
+		if section == SectionMemory || src.Kind == content.KindMemory {
 			src.ID = ""
 		}
 		dropped = append(dropped, Dropped{Section: section, Index: i, Source: src, Tokens: t})
