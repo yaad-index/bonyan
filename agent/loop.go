@@ -579,7 +579,7 @@ func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, bool) {
 	if r.a.Tools == nil {
 		return resultUnknown, false
 	}
-	ctx, end := r.a.Telemetry.Tool(ctx, tc, r.scrub.Scrub)
+	ctx, end := r.a.Telemetry.Tool(ctx, tc, r.a.Tools.Source(tc.Name), r.scrub.Scrub)
 	out, err := r.a.Tools.Call(ctx, tc)
 	end(r.scrub.Scrub(out), err)
 	switch {
