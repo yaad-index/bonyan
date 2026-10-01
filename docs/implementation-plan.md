@@ -153,6 +153,12 @@ The SQLite-backed implementation, passing the conformance suite. Adds the driver
 The approval hook, the durable pending-action store, restart cancelling pending actions when no durable store is configured, and late approvals for actions no longer held rejected as unknown.
 *Tests:* each of those behaviours, including a restart.
 
+### Later: 14b, approvals that survive a restart
+A durable approval store, and resuming a run whose action was approved after a restart. Resuming needs the run's state (its messages, the budget spent, the loop's counts) stored beside the pending action. That state can hold untrusted content and recalled memory, so before it is built: which parts are stored, whether memory sections are excluded as in recordings, and how deletion by subject and retention reach the stored state. It comes after phase 14.
+
+### Later: the model's replies in session history
+Storing the model's replies as session events needs a source kind for model output, which ADR 0001 §3 does not name; adding one is an amendment (maintainer approval required). Until then phase 12a stores the user's messages only, and history the run reads stays program-supplied.
+
 ### Phase 15: telemetry
 Spans and metrics per loop step, model call and tool call, using the pinned GenAI names from one package. Content capture is off by default and never includes memory sections.
 *Tests:* no message content appears in spans by default; memory never appears even with capture on; attribute names match the pinned conventions.
