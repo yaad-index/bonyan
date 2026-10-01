@@ -387,7 +387,8 @@ attached in code.
     unstored; the run goes on. The record's source, and the decision it is stored under, are the
     memory store's own (§4), whatever a hook changed;
   - memory recall: change what was recalled (redact an item, or leave one out) before it enters
-    context, or deny, which leaves that recall empty; the run goes on;
+    context, or deny, which leaves that recall empty; the run goes on. A hook there never adds an
+    item: what enters context from a recall is only what the store recalled;
   - approval: what a hook may do there is stated with the approval flow (§7), and hooks are not
     called at this point before it is built.
 
@@ -420,6 +421,8 @@ attached in code.
 - **A failing hook fails closed.** A hook that errors or panics at a point where it may change or
   deny counts as a denial. After a tool call, where a hook may change but not deny, that denial
   withholds the result: the model is told the result was withheld, as it is told a call was denied.
+  At memory write it leaves the text unstored, and at memory recall it leaves the recall empty; the
+  failure is recorded and the run goes on.
   An observe-only hook's failure is recorded and does not change the run.
 - **Re-runs (§8):** hooks do not run in a re-run unless opted in per hook, as with live tool
   execution, so a re-run does not reach a user or an outside service through a front-end.
@@ -470,5 +473,6 @@ attached in code.
   reference resolves through), and keeping the rest for a server is the program accepting untrusted
   text in instruction position.
 - §12: at memory write a hook may change or deny the text about to be stored, and at memory recall
-  what was recalled; a denial there leaves the record unstored or the recall empty and the run goes
-  on, and the store's source and decision for a record do not change with what a hook changed.
+  what was recalled but never add to it; a denial or a failing hook there leaves the record unstored
+  or the recall empty, recorded, and the run goes on; the store's source and decision for a record
+  do not change with what a hook changed.
