@@ -389,8 +389,17 @@ attached in code.
   - memory recall: change what was recalled (redact an item, or leave one out) before it enters
     context, or deny, which leaves that recall empty; the run goes on. A hook there never adds an
     item: what enters context from a recall is only what the store recalled;
-  - approval: what a hook may do there is stated with the approval flow (§7), and hooks are not
-    called at this point before it is built.
+  - approval: approve or deny the action handed to it, never change it, since what is approved is
+    what runs. The hook receives the action as it will run, after the before-tool-call hooks and
+    secret scrubbing, and why it needs approval: the agent marked it, or the trust policy's handling
+    required it. Each hook there approves, denies, abstains or answers that the decision is pending.
+    The action runs only when a hook approves it and none denies it. A denial is reported to the
+    model as a denied call, as before a tool call. When every hook has answered and none approved,
+    denied or said pending (they abstained, or only observing hooks are attached), the action is
+    cancelled at once; a pending answer keeps it waiting until a decision or the approval timeout,
+    which cancels it. A cancelled action is not cleared for a gate-type agent (§7). Every outcome is
+    recorded: approved, denied, failed or timed out with the hook that decided it, or cancelled
+    because no hook decided, with no hook named.
 
   A run ended by a denial is, for a gate-type agent, one more not-cleared case (§7).
 - **Several hooks at one point** run in their configured order. Each sees the payload as the hook
@@ -423,6 +432,7 @@ attached in code.
   withholds the result: the model is told the result was withheld, as it is told a call was denied.
   At memory write it leaves the text unstored, and at memory recall it leaves the recall empty; the
   failure is recorded and the run goes on.
+  At approval it denies the action.
   An observe-only hook's failure is recorded and does not change the run.
 - **Re-runs (§8):** hooks do not run in a re-run unless opted in per hook, as with live tool
   execution, so a re-run does not reach a user or an outside service through a front-end.
@@ -476,3 +486,8 @@ attached in code.
   what was recalled but never add to it; a denial or a failing hook there leaves the record unstored
   or the recall empty, recorded, and the run goes on; the store's source and decision for a record
   do not change with what a hook changed.
+- §12: at approval a hook may approve, deny, abstain or say the decision is pending, never change
+  the action; it runs only when one approves and none denies, a denial is reported to the model as a
+  denied call, it is cancelled at once when no hook approved, denied or said pending and at the
+  timeout when one said pending, a failing hook denies it, and every outcome is recorded, with the
+  deciding hook when there is one.
