@@ -26,4 +26,4 @@ go get -modfile=tools/go.mod -tool <package>@<version>
 - Tests use testify (`require` / `assert`) and always run with `-race`.
 - Pull request titles are Conventional Commits: squash merges use the title as the commit subject, and releases are computed from it.
 - A dependency that is load-bearing for the public API is decided in an ADR before it is added.
-- Some packages are nested modules with their own `go.mod` (today `tokenize/tiktoken`), so a heavy dependency reaches only the programs that import them. `make check` covers them; how they build against the root and how they are released is in ADR 0002, section 5, and `RELEASING.md`.
+- Some packages are nested modules with their own `go.mod` (today `memory/sqlite` and `tokenize/tiktoken`), so a heavy dependency reaches only the programs that import them. `make check` covers them; how they build against the root and how they are released is in ADR 0002, section 5, and `RELEASING.md`.

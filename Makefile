@@ -12,7 +12,7 @@ HOOK_PATH    := .githooks
 # Nested modules (ADR 0002). `./...` in the root never enters them, so every
 # target that works per module runs in each of these as well. Formatting walks
 # the whole tree and covers them already.
-NESTED       := tokenize/tiktoken
+NESTED       := memory/sqlite tokenize/tiktoken
 
 .PHONY: help fmt fmt-check lint vet test build tidy-check release-check githook-check check install-hooks
 

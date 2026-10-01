@@ -32,6 +32,15 @@ updates:
 
   # Each nested module (ADR 0002) has its own go.mod.
   - package-ecosystem: gomod
+    directory: "/memory/sqlite"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
     directory: "/tokenize/tiktoken"
     schedule:
       interval: weekly

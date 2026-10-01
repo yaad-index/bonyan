@@ -7,8 +7,20 @@
       "include-v-in-tag": true,
       "include-component-in-tag": false,
       "exclude-paths": [
+        "memory/sqlite",
         "tokenize/tiktoken"
       ],
+      "changelog-path": "CHANGELOG.md",
+      "bump-minor-pre-major": true,
+      "initial-version": "0.1.0"
+    },
+    "memory/sqlite": {
+      "release-type": "go",
+      "package-name": "memory/sqlite",
+      "component": "memory/sqlite",
+      "include-component-in-tag": true,
+      "tag-separator": "/",
+      "include-v-in-tag": true,
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "initial-version": "0.1.0"
