@@ -81,6 +81,53 @@ func TestADeclaredTrustedSourceArrivesAsTrustedText(t *testing.T) {
 	assert.Equal(t, []content.Text{content.TrustedFrom(content.Provenance{Kind: content.KindTool, ID: msgs[4].ToolCalls[0].ID}, "found it")}, msgs[5].Parts)
 }
 
+// trustKind is a program's policy that trusts one source kind.
+type trustKind struct{ kind content.Kind }
+
+func (p trustKind) Classify(_ context.Context, src content.Provenance) (trust.Decision, error) {
+	if src.Kind == p.kind {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// A remote tool's result is classified as remote tool output, so a policy
+// that trusts the program's own tools does not trust a tool server with them.
+func TestARemoteToolResultIsItsOwnSource(t *testing.T) {
+	for _, tc := range []struct {
+		remote  bool
+		source  string
+		trusted bool
+	}{
+		{remote: false, source: "tool", trusted: true},
+		{remote: true, source: "remote-tool", trusted: false},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			m := &scripted{steps: stepsOf(toolCall("search", `{}`), answer("done"))}
+			sink := &eventSink{}
+			a := newAgent(agent.Model{Name: "main", Chat: m})
+			a.Trust = trustKind{kind: content.KindTool}
+			a.Tools = &tools{out: map[string]string{"search": "found it"}, remote: map[string]bool{"search": tc.remote}}
+			c := withHooks(t, &a, sink, nil, nil)
+			a.Recorder = c.Recorder
+			_, _, err := agent.Run(context.Background(), a, input("go"))
+			require.NoError(t, err)
+
+			result := m.reqs[1].Messages[3]
+			require.Equal(t, model.RoleTool, result.Role)
+			require.Len(t, result.Parts, 1)
+			assert.Equal(t, tc.trusted, result.Parts[0].Trusted())
+			var last string
+			for _, e := range sink.events {
+				if e.Slot == registry.SlotTrust {
+					last = e.Source
+				}
+			}
+			assert.Equal(t, tc.source, last, "the tool result's recorded source kind")
+		})
+	}
+}
+
 // bonyan's own text in place of a tool result stays untrusted whatever the
 // policy says about tool output.
 func TestBonyansToolTextsStayUntrusted(t *testing.T) {

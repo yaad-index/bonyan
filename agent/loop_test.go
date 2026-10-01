@@ -69,10 +69,11 @@ func changingCall() func(model.ChatRequest) (model.ChatResponse, error) {
 }
 
 type tools struct {
-	mu    sync.Mutex
-	calls []model.ToolCall
-	out   map[string]string
-	err   map[string]error
+	mu     sync.Mutex
+	calls  []model.ToolCall
+	out    map[string]string
+	err    map[string]error
+	remote map[string]bool
 }
 
 func (t *tools) Definitions() []model.ToolDef {
@@ -90,6 +91,13 @@ func (t *tools) Call(_ context.Context, tc model.ToolCall) (string, error) {
 		return out, nil
 	}
 	return "", tool.ErrUnknown
+}
+
+func (t *tools) Source(name string) content.Kind {
+	if t.remote[name] {
+		return content.KindRemoteTool
+	}
+	return content.KindTool
 }
 
 var prices = budget.PriceTable{"main": {Input: 1_000_000, Output: 1_000_000}, "backup": {Input: 1_000_000, Output: 1_000_000}}

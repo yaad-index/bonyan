@@ -70,18 +70,19 @@ type Kind string
 // the kind of the material the fact was extracted from, so recall can report
 // both that it is memory and what it originally was.
 const (
-	KindFetched Kind = "fetched" // retrieved from outside: mail, web, feeds
-	KindUser    Kind = "user"    // supplied by an end user or an upload
-	KindTool    Kind = "tool"    // returned by a tool call
-	KindMemory  Kind = "memory"  // recalled memory derived from untrusted material
+	KindFetched    Kind = "fetched"     // retrieved from outside: mail, web, feeds
+	KindUser       Kind = "user"        // supplied by an end user or an upload
+	KindTool       Kind = "tool"        // returned by a tool call in the program
+	KindRemoteTool Kind = "remote-tool" // returned by a tool on a tool server
+	KindMemory     Kind = "memory"      // recalled memory derived from untrusted material
 )
 
 // Provenance records where untrusted text came from.
 type Provenance struct {
 	Kind Kind
 	// Origin is set when Kind is KindMemory: the kind of the untrusted material
-	// the recalled fact was extracted from (fetched, user or tool). It is empty
-	// for every other kind.
+	// the recalled fact was extracted from (fetched, user, tool or remote
+	// tool). It is empty for every other kind.
 	Origin Kind
 	// ID identifies the specific source (a message id, a URL, a tool call id).
 	// It is for tracing and audit, never for trust decisions.

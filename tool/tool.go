@@ -14,8 +14,10 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/secret"
+	"github.com/yaad-index/bonyan/tool/internal/remote"
 )
 
 // ErrUnknown is what Call returns for a name no tool is registered under.
@@ -42,6 +44,11 @@ type Spec struct {
 // Func is a tool's implementation. secrets resolves only the names in its Spec.
 type Func[In, Out any] func(ctx context.Context, in In, secrets *secret.Scoped) (Out, error)
 
+// RawFunc is the implementation of a tool whose input schema is given rather
+// than derived from a Go type. It receives arguments already validated against
+// that schema and returns its output as text.
+type RawFunc func(ctx context.Context, args json.RawMessage, secrets *secret.Scoped) (string, error)
+
 // Registry holds the tools a run may call.
 type Registry struct {
 	mu       sync.RWMutex
@@ -54,8 +61,11 @@ type entry struct {
 	def    model.ToolDef
 	spec   Spec
 	schema Schema
+	source content.Kind
 	call   func(ctx context.Context, args []byte, secrets *secret.Scoped) (string, error)
 }
+
+func init() { remote.Register = registerRemote }
 
 // NewRegistry returns an empty registry whose tools resolve secrets through
 // resolver. A nil resolver resolves nothing.
@@ -82,6 +92,7 @@ func Register[In, Out any](r *Registry, name string, spec Spec, fn Func[In, Out]
 		def:    model.ToolDef{Name: name, Description: spec.Description, Parameters: schema.JSON()},
 		spec:   spec,
 		schema: schema,
+		source: content.KindTool,
 		call: func(ctx context.Context, args []byte, secrets *secret.Scoped) (string, error) {
 			var in In
 			if err := json.Unmarshal(args, &in); err != nil {
@@ -98,6 +109,63 @@ func Register[In, Out any](r *Registry, name string, spec Spec, fn Func[In, Out]
 			return string(b), nil
 		},
 	}
+	return r.add(name, e)
+}
+
+// RegisterSchema adds a tool under name whose input schema is given rather
+// than derived from a Go type. Its arguments are validated against schema
+// before fn runs, and fn resolves only the secrets in spec, as with Register.
+func RegisterSchema(r *Registry, name string, spec Spec, schema Schema, fn RawFunc) error {
+	if name == "" {
+		return errors.New("tool: empty name")
+	}
+	if fn == nil {
+		return fmt.Errorf("tool %q: nil function", name)
+	}
+	if schema.IsZero() {
+		return fmt.Errorf("tool %q: no schema", name)
+	}
+	return r.add(name, &entry{
+		def:    model.ToolDef{Name: name, Description: spec.Description, Parameters: schema.JSON()},
+		spec:   spec,
+		schema: schema,
+		source: content.KindTool,
+		call: func(ctx context.Context, args []byte, secrets *secret.Scoped) (string, error) {
+			return fn(ctx, args, secrets)
+		},
+	})
+}
+
+// registerRemote adds a tool served by a tool server: its results are remote
+// tool output, it resolves no secrets and it may reach the network.
+func registerRemote(reg any, name, description string, schema json.RawMessage, call remote.Call) error {
+	r, ok := reg.(*Registry)
+	if !ok || r == nil {
+		return errors.New("tool: not a registry")
+	}
+	if name == "" {
+		return errors.New("tool: empty name")
+	}
+	if call == nil {
+		return fmt.Errorf("tool %q: nil function", name)
+	}
+	s, err := ParseSchema(schema)
+	if err != nil {
+		return fmt.Errorf("tool %q: %w", name, err)
+	}
+	spec := Spec{Description: description, Network: true}
+	return r.add(name, &entry{
+		def:    model.ToolDef{Name: name, Description: description, Parameters: s.JSON()},
+		spec:   spec,
+		schema: s,
+		source: content.KindRemoteTool,
+		call: func(ctx context.Context, args []byte, _ *secret.Scoped) (string, error) {
+			return call(ctx, args)
+		},
+	})
+}
+
+func (r *Registry) add(name string, e *entry) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.tools[name]; ok {
@@ -128,6 +196,18 @@ func (r *Registry) Spec(name string) (Spec, bool) {
 		return Spec{}, false
 	}
 	return e.spec, true
+}
+
+// Source is the source kind of the results of the tool registered under name:
+// content.KindRemoteTool for a tool on a tool server, content.KindTool for any
+// other, and for a name no tool is registered under.
+func (r *Registry) Source(name string) content.Kind {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if e, ok := r.tools[name]; ok {
+		return e.source
+	}
+	return content.KindTool
 }
 
 // Call validates the call's arguments against the tool's input schema and runs
