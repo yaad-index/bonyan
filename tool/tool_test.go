@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/tool"
@@ -267,4 +268,47 @@ func TestNoValidatorKeywordQuotesTheData(t *testing.T) {
 		assert.NotContains(t, err.Error(), marker, keyword)
 		assert.NotContains(t, err.Error(), "x\"", keyword)
 	}
+}
+
+// A tool whose schema is given rather than derived is validated against it and
+// gets only the secrets it declared, as a typed one does.
+func TestAToolWithAGivenSchema(t *testing.T) {
+	r := tool.NewRegistry(secret.NewResolver(source{"weather_key": "k-1", "other_key": "k-2"}))
+	schema, err := tool.ParseSchema(json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`))
+	require.NoError(t, err)
+	var got []string
+	require.NoError(t, tool.RegisterSchema(r, "weather", tool.Spec{Description: "the forecast", Secrets: []string{"weather_key"}}, schema,
+		func(ctx context.Context, args json.RawMessage, secrets *secret.Scoped) (string, error) {
+			got = append(got, string(args))
+			key, err := secrets.Resolve(ctx, "weather_key")
+			if err != nil {
+				return "", err
+			}
+			if _, err := secrets.Resolve(ctx, "other_key"); err == nil {
+				return "", errors.New("resolved a secret it was not granted")
+			}
+			return "sunny with " + key.Reveal(), nil
+		}))
+
+	defs := r.Definitions()
+	require.Len(t, defs, 1)
+	assert.JSONEq(t, string(schema.JSON()), string(defs[0].Parameters))
+	out, err := r.Call(context.Background(), call(`{"city":"Berlin"}`))
+	require.NoError(t, err)
+	assert.Equal(t, "sunny with k-1", out)
+	_, err = r.Call(context.Background(), call(`{"city":7}`))
+	require.ErrorIs(t, err, tool.ErrInvalidArguments)
+	assert.Equal(t, []string{`{"city":"Berlin"}`}, got, "the invalid call never ran")
+	assert.Equal(t, content.KindTool, r.Source("weather"))
+
+	require.Error(t, tool.RegisterSchema(r, "empty", tool.Spec{}, tool.Schema{},
+		func(context.Context, json.RawMessage, *secret.Scoped) (string, error) { return "", nil }))
+}
+
+// Every tool registered in the program reports its results as tool output; only
+// the tool-server adapter can register one whose results are remote.
+func TestATypedToolsResultsAreToolOutput(t *testing.T) {
+	r, _ := newRegistry(t)
+	assert.Equal(t, content.KindTool, r.Source("weather"))
+	assert.Equal(t, content.KindTool, r.Source("missing"))
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/yaad-index/bonyan/budget"
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/telemetry"
 	"github.com/yaad-index/bonyan/tool"
@@ -41,7 +42,7 @@ func TestNilTelemetry(t *testing.T) {
 	got, endStep := tel.Step(ctx, 1)
 	assert.Equal(t, ctx, got)
 	endStep()
-	got, endTool := tel.Tool(ctx, model.ToolCall{Name: "t"}, nil)
+	got, endTool := tel.Tool(ctx, model.ToolCall{Name: "t"}, content.KindTool, nil)
 	assert.Equal(t, ctx, got)
 	endTool("", nil)
 	var c model.Chat

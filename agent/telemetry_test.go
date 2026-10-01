@@ -355,3 +355,17 @@ func TestCapturedContentLeavesOutTrustedMemory(t *testing.T) {
 	assert.NotContains(t, all, trustedFact)
 	assert.NotContains(t, all, textMemory)
 }
+
+// A tool on a tool server is an "extension" in the conventions' terms, a tool
+// in the program a "function".
+func TestToolTypeFollowsTheResultsSource(t *testing.T) {
+	for remote, want := range map[bool]string{false: "function", true: "extension"} {
+		m := &scripted{steps: stepsOf(toolCall("search", `{}`), answer("done"))}
+		a := newAgent(agent.Model{Name: "main", Chat: m})
+		a.Tools = &tools{out: map[string]string{"search": "found it"}, remote: map[string]bool{"search": remote}}
+		o := observe(t, a, telemetry.Options{}, input("go"))
+		v, ok := attr(o.span(t, "execute_tool search"), "gen_ai.tool.type")
+		require.True(t, ok)
+		assert.Equal(t, want, v.AsString())
+	}
+}

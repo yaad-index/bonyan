@@ -34,6 +34,10 @@ type Tools interface {
 	// to the model by kind (tool.ErrUnknown, tool.ErrInvalidArguments with
 	// its path and rule, or a failure); it does not end the run.
 	Call(ctx context.Context, call model.ToolCall) (string, error)
+	// Source is the source kind the trust policy classifies the named tool's
+	// results under: content.KindTool, or content.KindRemoteTool for a tool on
+	// a tool server (ADR 0001 §3).
+	Source(name string) content.Kind
 }
 
 // Model is a chat model with the name the price table and recordings know it
@@ -550,7 +554,11 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
 		call.Arguments = v.Event.Call.Arguments
 	}
 	text, ran := r.callTool(ctx, call)
-	result := content.From(content.Provenance{Kind: content.KindTool, ID: tc.ID}, text)
+	kind := content.KindTool
+	if ran {
+		kind = r.a.Tools.Source(call.Name)
+	}
+	result := content.From(content.Provenance{Kind: kind, ID: tc.ID}, text)
 	var out content.Text = result
 	if ran {
 		out = registry.Classify(ctx, r.policy, result)
@@ -571,7 +579,7 @@ func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, bool) {
 	if r.a.Tools == nil {
 		return resultUnknown, false
 	}
-	ctx, end := r.a.Telemetry.Tool(ctx, tc, r.scrub.Scrub)
+	ctx, end := r.a.Telemetry.Tool(ctx, tc, r.a.Tools.Source(tc.Name), r.scrub.Scrub)
 	out, err := r.a.Tools.Call(ctx, tc)
 	end(r.scrub.Scrub(out), err)
 	switch {

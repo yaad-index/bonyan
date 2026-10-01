@@ -182,13 +182,19 @@ func (c *tracedChat) Chat(ctx context.Context, req model.ChatRequest) (model.Cha
 	return resp, err
 }
 
-// Tool starts the span of one tool call. end takes the result the model is
-// given and the call's error, if any. scrub is as for Chat.
-func (t *Telemetry) Tool(ctx context.Context, call model.ToolCall, scrub func(string) string) (context.Context, func(result string, err error)) {
+// Tool starts the span of one tool call. source is the kind of the tool's
+// results: a tool on a tool server is an "extension" in the conventions' terms,
+// any other a "function". end takes the result the model is given and the
+// call's error, if any. scrub is as for Chat.
+func (t *Telemetry) Tool(ctx context.Context, call model.ToolCall, source content.Kind, scrub func(string) string) (context.Context, func(result string, err error)) {
 	if t == nil {
 		return ctx, func(string, error) {}
 	}
-	attrs := []attribute.KeyValue{opExecuteTool, keyToolName.String(call.Name), keyToolCallID.String(call.ID), keyToolType.String("function")}
+	toolType := "function"
+	if source == content.KindRemoteTool {
+		toolType = "extension"
+	}
+	attrs := []attribute.KeyValue{opExecuteTool, keyToolName.String(call.Name), keyToolCallID.String(call.ID), keyToolType.String(toolType)}
 	capture := t.capture && scrub != nil
 	if capture {
 		attrs = append(attrs, keyToolCallArguments.String(scrub(string(call.Arguments))))
