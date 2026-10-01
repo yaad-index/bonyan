@@ -213,10 +213,11 @@ Two other positions were considered and rejected:
     level of the definition, and drops the rest: the tool's description, and in each schema every
     keyword validation does not use, among them description, title, examples, default, `$comment`
     and any keyword the server invents. What stays is the tool's name (under a prefix the program
-    chooses), property names, enum and const values, patterns, formats and the names of the
-    definitions a reference points to; that is the server-written text that still reaches the
-    model. A program can keep everything for a given server; doing so is the program accepting
-    untrusted text in instruction position.
+    chooses), property names, enum and const values, patterns, formats, the names of the
+    definitions a reference points to, and the identifiers and anchors a reference resolves
+    through; that is the server-written text that still reaches the model. A program can keep
+    everything for a given server; doing so is the program accepting untrusted text in instruction
+    position.
 - Each tool declares what it may touch: secrets by name, network, filesystem. **Only secrets are
   enforced**, because bonyan is what resolves them (§10). Network and filesystem declarations are
   metadata for review and approval, not a sandbox: in-process Go code can open a socket or a file
@@ -460,5 +461,6 @@ attached in code.
 - §3, §4, §5: remote tool output is a source of its own, untrusted under the default policy and kept
   as a recalled fact's source; of the text a tool server writes into a tool's definition, only
   what a call needs to be valid is kept by default (the tool's name, property names, enum and const
-  values, patterns, formats and referenced definition names), and keeping the rest for a server is
-  the program accepting untrusted text in instruction position.
+  values, patterns, formats, referenced definition names, and the identifiers and anchors a
+  reference resolves through), and keeping the rest for a server is the program accepting untrusted
+  text in instruction position.
