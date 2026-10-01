@@ -16,6 +16,7 @@ import (
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
+	"github.com/yaad-index/bonyan/telemetry"
 	"github.com/yaad-index/bonyan/tokenize"
 	"github.com/yaad-index/bonyan/tool"
 	"github.com/yaad-index/bonyan/trust"
@@ -99,6 +100,11 @@ type Agent struct {
 	// context (ADR 0001 §10); nil means a scrubber holding no values. Pass
 	// registry.Components.Secrets.Scrubber(), the one the hooks scrub with.
 	Scrubber *secret.Scrubber
+	// Name names the agent in telemetry; empty leaves it out.
+	Name string
+	// Telemetry emits a span per run, loop step, model call and tool call,
+	// and metrics for the model calls (ADR 0001 §9); nil emits nothing.
+	Telemetry *telemetry.Telemetry
 }
 
 // Output is the structured answer a run must give.
@@ -223,11 +229,15 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 		if a.Recorder != nil {
 			c = record.Chat(c, m.Name, a.Recorder)
 		}
+		// Inside the budget, so only a call that is sent has a span.
+		price, _ := a.Prices.Lookup(m.Name)
+		c = a.Telemetry.Chat(c, m.Name, price, scrub.Scrub)
 		models[i] = model.Retry(budget.Chat(c, m.Name, meter, counter), a.Retry)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, limits.Deadline)
 	defer cancel()
+	ctx, endRun := a.Telemetry.Run(ctx, a.Name)
 
 	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter}
 	r.policy = registry.GuardPolicy(a.Trust, a.Recorder)
@@ -239,6 +249,7 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 		ended = string(out.Reason())
 	}
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunEnd, Outcome: ended})
+	endRun(ended, out.Cleared())
 	return out, rep, nil
 }
 
@@ -290,7 +301,13 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 	}
 
 	retries := 0
+	endStep := func() {}
+	defer func() { endStep() }()
+	runCtx := ctx
 	for step := 1; step <= maxSteps; step++ {
+		endStep()
+		var ctx context.Context
+		ctx, endStep = r.a.Telemetry.Step(runCtx, step)
 		rep.Steps = step
 		if err := ctx.Err(); err != nil {
 			rep.Err = err
@@ -554,7 +571,9 @@ func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, bool) {
 	if r.a.Tools == nil {
 		return resultUnknown, false
 	}
+	ctx, end := r.a.Telemetry.Tool(ctx, tc, r.scrub.Scrub)
 	out, err := r.a.Tools.Call(ctx, tc)
+	end(r.scrub.Scrub(out), err)
 	switch {
 	case errors.Is(err, tool.ErrUnknown):
 		return resultUnknown, false

@@ -34,6 +34,12 @@ type Price struct {
 	Output int64 `json:"output"`
 }
 
+// Cost is what usage costs at p, in millionths of the price table's unit,
+// rounded up and saturating at math.MaxInt64.
+func (p Price) Cost(u model.Usage) int64 {
+	return satAdd(costMicros(u.InputTokens, p.Input), costMicros(u.OutputTokens, p.Output))
+}
+
 // PriceTable holds the price of each model by the name the program calls it
 // by. It is configuration.
 type PriceTable map[string]Price
@@ -148,7 +154,7 @@ func (m *Meter) Charge(modelName string, u *model.Usage) error {
 	p, priceErr := m.prices.Lookup(modelName)
 	var cost int64
 	if priceErr == nil {
-		cost = satAdd(costMicros(u.InputTokens, p.Input), costMicros(u.OutputTokens, p.Output))
+		cost = p.Cost(*u)
 	}
 
 	m.mu.Lock()
