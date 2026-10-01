@@ -224,3 +224,47 @@ func TestASchemasJSONIsACopy(t *testing.T) {
 	assert.True(t, tool.Schema{}.IsZero())
 	assert.Error(t, tool.Schema{}.Validate([]byte(`{}`)))
 }
+
+// Against the real validator, for every keyword it checks: whatever the failing
+// value holds, the error carries none of it. A dependency update that changes a
+// message to quote the data fails here.
+func TestNoValidatorKeywordQuotesTheData(t *testing.T) {
+	const marker = "MARKER-9c1e"
+	str := `"` + marker + `: x"`
+	for keyword, c := range map[string]struct{ schema, data string }{
+		"type":                 {`{"type":"integer"}`, str},
+		"enum":                 {`{"enum":["a","b"]}`, str},
+		"const":                {`{"const":"a"}`, str},
+		"pattern":              {`{"type":"string","pattern":"^a$"}`, str},
+		"minLength":            {`{"type":"string","minLength":100}`, str},
+		"maxLength":            {`{"type":"string","maxLength":1}`, str},
+		"minimum":              {`{"type":"number","minimum":10}`, `1`},
+		"maximum":              {`{"type":"number","maximum":0}`, `1`},
+		"exclusiveMinimum":     {`{"type":"number","exclusiveMinimum":1}`, `1`},
+		"exclusiveMaximum":     {`{"type":"number","exclusiveMaximum":1}`, `1`},
+		"multipleOf":           {`{"type":"number","multipleOf":3}`, `1`},
+		"minItems":             {`{"type":"array","minItems":5}`, `[` + str + `]`},
+		"maxItems":             {`{"type":"array","maxItems":0}`, `[` + str + `]`},
+		"uniqueItems":          {`{"type":"array","uniqueItems":true}`, `[` + str + `,` + str + `]`},
+		"contains":             {`{"type":"array","contains":{"const":"a"}}`, `[` + str + `]`},
+		"items":                {`{"type":"array","items":{"type":"integer"}}`, `[` + str + `]`},
+		"required":             {`{"type":"object","required":["a"]}`, `{"` + marker + `":1}`},
+		"additionalProperties": {`{"type":"object","additionalProperties":false}`, `{"` + marker + `":1}`},
+		"propertyNames":        {`{"type":"object","propertyNames":{"pattern":"^a$"}}`, `{"` + marker + `":1}`},
+		"minProperties":        {`{"type":"object","minProperties":3}`, `{"` + marker + `":1}`},
+		"maxProperties":        {`{"type":"object","maxProperties":0}`, `{"` + marker + `":1}`},
+		"dependentRequired":    {`{"type":"object","dependentRequired":{"a":["b"]}}`, `{"a":` + str + `}`},
+		"anyOf":                {`{"anyOf":[{"type":"integer"},{"type":"boolean"}]}`, str},
+		"oneOf":                {`{"oneOf":[{"type":"integer"},{"type":"boolean"}]}`, str},
+		"allOf":                {`{"allOf":[{"type":"integer"}]}`, str},
+		"not":                  {`{"not":{"type":"string"}}`, str},
+		"if/then":              {`{"if":{"type":"string"},"then":{"const":"a"}}`, str},
+	} {
+		s, err := tool.ParseSchema(json.RawMessage(c.schema))
+		require.NoError(t, err, keyword)
+		err = s.Validate([]byte(c.data))
+		require.Error(t, err, "%s should fail", keyword)
+		assert.NotContains(t, err.Error(), marker, keyword)
+		assert.NotContains(t, err.Error(), "x\"", keyword)
+	}
+}
