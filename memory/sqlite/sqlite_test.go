@@ -164,3 +164,44 @@ func TestTheIndexDeletesSecurely(t *testing.T) {
 	require.NoError(t, b.db.QueryRow(`SELECT v FROM records_text_config WHERE k = 'secure-delete'`).Scan(&v))
 	assert.Equal(t, 1, v)
 }
+
+// A reader holding the write-ahead log keeps a delete from emptying it. The
+// delete then says so rather than reporting success, and once the reader lets
+// go, a later delete empties the log and the text is gone.
+func TestADeleteThatCannotEmptyTheLogSaysSo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	b := open(t, path)
+	defer func() { require.NoError(t, b.Close()) }()
+	write(t, b, rec(memory.LongTerm, "ana", "zebracrossing fact", start), rec(memory.LongTerm, "bo", "giraffeneck fact", start))
+
+	reader, err := b.db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	var n int
+	require.NoError(t, reader.QueryRow(`SELECT count(*) FROM records`).Scan(&n), "the read holds a snapshot")
+
+	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	err = b.DeleteSubject(short, "ana")
+	require.ErrorIs(t, err, ErrLogNotEmptied)
+	got, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, got, "the records are deleted all the same")
+	assert.True(t, strings.Contains(onDisk(t, path), "zebracrossing"), "the positive control: the text is still in the log")
+
+	require.NoError(t, reader.Rollback())
+	require.NoError(t, b.DeleteSubject(ctx, "ana"), "with the reader gone the log empties")
+	assert.False(t, strings.Contains(onDisk(t, path), "zebracrossing"), "zebracrossing still on disk")
+}
+
+// Emptying the log turns SQLite's own wait off on the connection it uses; the
+// connection goes back to the pool with its wait restored.
+func TestTheLogCheckpointRestoresTheConnectionsWait(t *testing.T) {
+	b := open(t, filepath.Join(t.TempDir(), "memory.db"))
+	defer func() { require.NoError(t, b.Close()) }()
+	b.db.SetMaxOpenConns(1) // so the next query gets the connection the delete used
+	write(t, b, rec(memory.LongTerm, "ana", "a fact", start))
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+	var wait int
+	require.NoError(t, b.db.QueryRow(`PRAGMA busy_timeout`).Scan(&wait))
+	assert.Equal(t, 5000, wait)
+}

@@ -5,7 +5,8 @@
 // database overwrites deleted content, the full-text index removes a deleted
 // record's entries and is merged so no old copy of them stays in the file, and
 // the write-ahead log is emptied after every delete, so a deleted record's text
-// does not survive in an older log frame.
+// does not survive in an older log frame. A reader holding the log can keep it
+// from emptying; the delete then returns ErrLogNotEmptied.
 //
 // The file and its write-ahead log are created readable by their owner only.
 // Keep the file outside the working tree.
@@ -211,6 +212,54 @@ func (b *Backend) delete(ctx context.Context, where string, arg any) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	_, err = b.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
-	return err
+	return b.emptyLog(ctx)
+}
+
+// ErrLogNotEmptied is what a delete returns when the records are deleted but
+// the write-ahead log could not be emptied, because a reader held it for as
+// long as the delete could wait. The deleted text can remain in the log until
+// a later delete, or closing the database, empties it.
+var ErrLogNotEmptied = errors.New("sqlite: deleted, but the write-ahead log could not be emptied")
+
+// logWait bounds how long a delete waits for readers to let the log go.
+const logWait = 5 * time.Second
+
+// emptyLog checkpoints the write-ahead log and truncates it, retrying while a
+// reader holds it, until ctx ends or logWait has passed. The checkpoint runs on
+// its own connection with SQLite's busy wait off, so this loop alone decides
+// how long to wait and reads every answer.
+func (b *Backend) emptyLog(ctx context.Context) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, logWait)
+	defer cancel()
+	conn, err := b.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrLogNotEmptied, err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = 0`); err != nil {
+		return fmt.Errorf("%w: %w", ErrLogNotEmptied, err)
+	}
+	// The connection goes back to the pool, so it gets its wait back.
+	defer func() {
+		if _, rerr := conn.ExecContext(context.Background(), `PRAGMA busy_timeout = 5000`); rerr != nil && err == nil {
+			err = rerr
+		}
+	}()
+	pause := 10 * time.Millisecond
+	for {
+		var busy, frames, checkpointed int
+		qerr := conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed)
+		if qerr == nil && busy == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			if qerr != nil {
+				return fmt.Errorf("%w: %w", ErrLogNotEmptied, qerr)
+			}
+			return ErrLogNotEmptied
+		case <-time.After(pause):
+		}
+		pause = min(2*pause, 200*time.Millisecond)
+	}
 }
