@@ -17,6 +17,13 @@ const (
 	FailPanic      Failure = "panic"       // the implementation panicked
 	FailDeadline   Failure = "deadline"    // the context ended before it returned
 	FailNoDecision Failure = "no decision" // a policy returned no verdict
+	FailNotAllowed Failure = "not allowed" // a hook's action is not one its point allows, or would raise trust
+)
+
+// The decisions recorded for a hook that acted.
+const (
+	DecisionChanged = "changed"
+	DecisionDenied  = "denied"
 )
 
 // SinkFile is the name the file recording sink is registered under. Its

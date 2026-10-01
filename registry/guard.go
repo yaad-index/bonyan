@@ -2,11 +2,13 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -89,19 +91,135 @@ func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) 
 	return d, nil
 }
 
-// guardedHook runs one hook. Hooks only observe so far, and an observing
-// hook's failure is recorded and does not change the run (ADR 0001 §12).
+// guardedHook runs one hook inside ADR 0001 §12's rules. An observing hook's
+// failure is recorded and changes nothing. An Interceptor's failure, or an
+// action its point does not allow, is a denial. A change is put back in the
+// type and provenance of what it replaces and scrubbed again, so a hook can
+// neither raise trust nor put a resolved secret back. Every change and denial
+// is recorded with the hook's name.
 type guardedHook struct {
 	name  string
 	inner hook.Hook
 	rec   events
+	scrub *secret.Scrubber
 }
 
-// Observe never returns an error; a failure is recorded instead.
-func (g guardedHook) Observe(ctx context.Context, ev hook.Event) error {
-	_, failure := call(ctx, func() (struct{}, error) { return struct{}{}, g.inner.Observe(ctx, ev) })
-	if failure != "" {
-		g.rec.Event(record.Event{Slot: SlotHook, Name: g.name, Point: string(ev.Point), Failure: string(failure)})
+// run calls the hook on ev and returns the event as the hook left it, whether
+// it changed it, and whether it denied.
+func (g guardedHook) run(ctx context.Context, ev hook.Event) (hook.Event, bool, bool) {
+	ic, ok := g.inner.(hook.Interceptor)
+	if !ok {
+		_, failure := call(ctx, func() (struct{}, error) { return struct{}{}, g.inner.Observe(ctx, ev) })
+		if failure != "" {
+			g.event(ev.Point, "", failure)
+		}
+		return ev, false, false
 	}
-	return nil
+	act, failure := call(ctx, func() (hook.Action, error) { return ic.Intercept(ctx, ev) })
+	if failure != "" {
+		g.event(ev.Point, DecisionDenied, failure)
+		return ev, false, true
+	}
+	if act.Deny {
+		if hook.Rights(ev.Point)&hook.Deny == 0 {
+			g.event(ev.Point, DecisionDenied, FailNotAllowed)
+		} else {
+			g.event(ev.Point, DecisionDenied, "")
+		}
+		return ev, false, true
+	}
+	if act.Text == nil && act.Arguments == nil && act.Messages == nil {
+		return ev, false, false
+	}
+	next, ok := g.apply(ev, act)
+	if !ok {
+		g.event(ev.Point, DecisionDenied, FailNotAllowed)
+		return ev, false, true
+	}
+	g.event(ev.Point, DecisionChanged, "")
+	return next, true, false
+}
+
+// apply puts act's change into ev, or reports that the point does not allow
+// it or that it would raise trust. Each kind of change is accepted only at the
+// point Rights gives a change to.
+func (g guardedHook) apply(ev hook.Event, act hook.Action) (hook.Event, bool) {
+	set := 0
+	for _, b := range []bool{act.Text != nil, act.Arguments != nil, act.Messages != nil} {
+		if b {
+			set++
+		}
+	}
+	if set != 1 {
+		return ev, false
+	}
+	switch {
+	case act.Text != nil && ev.Point == hook.UserMessage:
+		ev.Message = content.From(ev.Message.Provenance(), g.scrub.Scrub(*act.Text))
+	case act.Text != nil && ev.Point == hook.AfterTool:
+		ev.Result = content.From(ev.Result.Provenance(), g.scrub.Scrub(*act.Text))
+	case act.Text != nil && ev.Point == hook.Reply:
+		ev.Reply = g.scrub.Scrub(*act.Text)
+	case act.Arguments != nil && ev.Point == hook.BeforeTool:
+		args := []byte(g.scrub.Scrub(string(act.Arguments)))
+		if !json.Valid(args) {
+			return ev, false
+		}
+		ev.Call.Arguments = args
+	case act.Messages != nil && ev.Point == hook.BeforeModel:
+		msgs, ok := keepTrust(ev.Messages, act.Messages, g.scrub)
+		if !ok {
+			return ev, false
+		}
+		ev.Messages = msgs
+	default:
+		return ev, false
+	}
+	return ev, true
+}
+
+// keepTrust checks that changed holds no trusted part the original did not and
+// no untrusted part with a provenance the original did not, and returns it with
+// its untrusted parts scrubbed.
+func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]model.Message, bool) {
+	trusted := map[string]int{}
+	provs := map[content.Provenance]bool{}
+	for _, m := range original {
+		for _, p := range m.Parts {
+			switch v := p.(type) {
+			case content.Trusted:
+				trusted[v.String()]++
+			case content.Untrusted:
+				provs[v.Provenance()] = true
+			}
+		}
+	}
+	out := make([]model.Message, len(changed))
+	for i, m := range changed {
+		parts := make([]content.Text, len(m.Parts))
+		for j, p := range m.Parts {
+			switch v := p.(type) {
+			case content.Trusted:
+				if trusted[v.String()] == 0 {
+					return nil, false
+				}
+				trusted[v.String()]--
+				parts[j] = v
+			case content.Untrusted:
+				if !provs[v.Provenance()] {
+					return nil, false
+				}
+				parts[j] = scrub.ScrubText(v)
+			default:
+				return nil, false
+			}
+		}
+		m.Parts = parts
+		out[i] = m
+	}
+	return out, true
+}
+
+func (g guardedHook) event(p hook.Point, decision string, failure Failure) {
+	g.rec.Event(record.Event{Slot: SlotHook, Name: g.name, Point: string(p), Decision: decision, Failure: string(failure)})
 }

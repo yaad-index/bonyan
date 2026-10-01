@@ -19,6 +19,7 @@ const (
 	ReasonFallbackExhausted Reason = "fallback_exhausted" // every configured model failed
 	ReasonLoopDetected      Reason = "loop_detected"      // the loop repeated itself past its threshold
 	ReasonApproverTimeout   Reason = "approver_timeout"   // an action needing approval got no decision
+	ReasonDenied            Reason = "denied"             // a hook denied the message, a model call or the reply
 )
 
 // Outcome is what a run returns: either an answer, or not cleared with a
