@@ -214,7 +214,7 @@ func TestAChangeKeepsTheProvenanceOfWhatItReplaced(t *testing.T) {
 	out, _, err := agent.Run(context.Background(), a, input("go"))
 	require.NoError(t, err)
 
-	user, ok := m.reqs[0].Messages[1].Parts[0].(content.Untrusted)
+	user, ok := item(m.reqs[0].Messages[1].Parts[0])
 	require.True(t, ok, "a changed message stays untrusted")
 	assert.Equal(t, "rewritten", user.Raw())
 	assert.Equal(t, content.Provenance{Kind: content.KindUser, ID: "m1"}, user.Provenance())
@@ -222,7 +222,7 @@ func TestAChangeKeepsTheProvenanceOfWhatItReplaced(t *testing.T) {
 	require.Len(t, tl.calls, 1)
 	assert.JSONEq(t, `{"q":"y"}`, string(tl.calls[0].Arguments), "the tool runs with the changed arguments")
 
-	res, ok := m.reqs[1].Messages[3].Parts[0].(content.Untrusted)
+	res, ok := item(m.reqs[1].Messages[3].Parts[0])
 	require.True(t, ok, "a changed result stays untrusted")
 	assert.Equal(t, "trimmed", res.Raw())
 	assert.Equal(t, content.KindTool, res.Provenance().Kind)
@@ -339,7 +339,7 @@ func TestADeniedToolCallIsReportedToTheModel(t *testing.T) {
 	assert.True(t, out.Cleared(), "the run goes on")
 	assert.Empty(t, tl.calls, "the tool is not called")
 	assert.Empty(t, after.events, "no after-tool hook for a call that did not run")
-	res := m.reqs[1].Messages[3].Parts[0].(content.Untrusted)
+	res := mustItem(t, m.reqs[1].Messages[3].Parts[0])
 	assert.Equal(t, "error: the call was denied", res.Raw())
 }
 
@@ -359,7 +359,7 @@ func TestAFailureAfterAToolWithholdsTheResult(t *testing.T) {
 			out, _, err := agent.Run(context.Background(), a, input("go"))
 			require.NoError(t, err)
 			assert.True(t, out.Cleared(), out.String())
-			res := m.reqs[1].Messages[3].Parts[0].(content.Untrusted)
+			res := mustItem(t, m.reqs[1].Messages[3].Parts[0])
 			assert.Equal(t, "error: the result was withheld", res.Raw())
 			require.Len(t, sink.events, 1)
 			assert.Equal(t, registry.DecisionDenied, sink.events[0].Decision)
@@ -440,7 +440,7 @@ func TestHooksNeverHoldASecret(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, h.seen, 1)
 	assert.NotContains(t, h.seen[0].Result.Raw(), value, "scrubbed before the hook")
-	res := m.reqs[1].Messages[3].Parts[0].(content.Untrusted)
+	res := mustItem(t, m.reqs[1].Messages[3].Parts[0])
 	assert.Equal(t, "put back [REDACTED]", res.Raw(), "scrubbed again after it")
 }
 
@@ -470,8 +470,9 @@ func TestHooksNeverHoldASecretFromTheRunsOwnContent(t *testing.T) {
 	msg := &interceptor{f: func(hook.Event) (hook.Action, error) { return hook.Action{Text: text("again " + value)}, nil }}
 	req := &interceptor{f: func(ev hook.Event) (hook.Action, error) {
 		msgs := append([]model.Message(nil), ev.Messages...)
-		u := msgs[1].Parts[0].(content.Untrusted)
-		msgs[1] = model.Message{Role: model.RoleUser, Parts: []content.Text{content.From(u.Provenance(), u.Raw()+" and "+value)}}
+		sec := msgs[1].Parts[0].(content.Section)
+		u := sec.Items()[0]
+		msgs[1] = model.Message{Role: model.RoleUser, Parts: []content.Text{content.NewSection(sec.Label(), content.From(u.Provenance(), u.Raw()+" and "+value))}}
 		return hook.Action{Messages: msgs}, nil
 	}}
 	c := withHooks(t, &a, nil, map[hook.Point][]string{
@@ -489,7 +490,7 @@ func TestHooksNeverHoldASecretFromTheRunsOwnContent(t *testing.T) {
 	assert.Equal(t, "my [REDACTED]", o.events[0].Message.Raw(), "the input")
 	assert.Equal(t, "echo [REDACTED]", o.events[1].Response.Content, "the model's response")
 	assert.Equal(t, "echo [REDACTED]", o.events[2].Reply, "the reply")
-	user := m.reqs[0].Messages[1].Parts[0].(content.Untrusted)
+	user := mustItem(t, m.reqs[0].Messages[1].Parts[0])
 	assert.Equal(t, "again [REDACTED] and [REDACTED]", user.Raw(), "both changes scrubbed again")
 }
 
@@ -506,7 +507,7 @@ func TestAChangedMessageIsScrubbedAgain(t *testing.T) {
 	require.NoError(t, err)
 	_, _, err = agent.Run(context.Background(), a, input("go"))
 	require.NoError(t, err)
-	user := m.reqs[0].Messages[1].Parts[0].(content.Untrusted)
+	user := mustItem(t, m.reqs[0].Messages[1].Parts[0])
 	assert.Equal(t, "again [REDACTED]", user.Raw())
 }
 

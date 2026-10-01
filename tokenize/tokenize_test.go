@@ -61,3 +61,10 @@ func TestDefaultAllowance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(tokenize.DefaultPerMessage+len("user")), n)
 }
+
+func TestASectionCountsAsItRenders(t *testing.T) {
+	s := content.NewSection("material", content.From(content.Provenance{Kind: content.KindFetched, ID: "d"}, "page"))
+	n, err := tokenize.ByteBound{PerMessage: 1}.Count(model.ChatRequest{Messages: []model.Message{msg(model.RoleUser, s)}})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1+len("user")+len(s.Render())), n)
+}

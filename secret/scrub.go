@@ -76,6 +76,12 @@ func (s *Scrubber) ScrubText(t content.Text) content.Text {
 		return content.Instruction(s.Scrub(v.String()))
 	case content.Untrusted:
 		return content.From(v.Provenance(), s.Scrub(v.Raw()))
+	case content.Section:
+		items := v.Items()
+		for i, it := range items {
+			items[i] = content.From(it.Provenance(), s.Scrub(it.Raw()))
+		}
+		return content.NewSection(v.Label(), items...)
 	}
 	return t
 }

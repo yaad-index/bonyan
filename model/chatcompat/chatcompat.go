@@ -247,6 +247,8 @@ func joinParts(parts []content.Text) string {
 			texts = append(texts, v.String())
 		case content.Untrusted:
 			texts = append(texts, v.Raw())
+		case content.Section:
+			texts = append(texts, v.Render())
 		}
 	}
 	return strings.Join(texts, "\n\n")

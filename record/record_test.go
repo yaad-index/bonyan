@@ -495,3 +495,23 @@ func TestHistoryToolCallsAreRecorded(t *testing.T) {
 	_, err = record.NewReplay(h, calls, r.Scrubber()).Model("main").Chat(context.Background(), req(`{"code":"other"}`))
 	require.ErrorIs(t, err, record.ErrMismatch, "different tool-call arguments in the history")
 }
+
+// A section is recorded as its label and items, and a memory item inside it
+// is excluded like any memory part.
+func TestASectionIsRecordedItemByItem(t *testing.T) {
+	sec := content.NewSection("memory", memory("prefers the window seat").(content.Untrusted), content.From(content.Provenance{Kind: content.KindFetched, ID: "d"}, "a page"))
+	req := model.ChatRequest{
+		Messages:        []model.Message{system("be brief"), {Role: model.RoleUser, Parts: []content.Text{sec}}},
+		MaxOutputTokens: 10,
+	}
+	f := openFile(t, record.FileOptions{})
+	_, err := record.Chat(&scripted{steps: []step{{resp: model.ChatResponse{Content: "done", Usage: &model.Usage{}}}}}, "main", newRecorder(t, f)).Chat(context.Background(), req)
+	require.NoError(t, err)
+	_, calls, raw := readFile(t, f)
+	part := calls[0].Request.Messages[1].Parts[0]
+	assert.Equal(t, "memory", part.Section)
+	require.Len(t, part.Items, 2)
+	assert.True(t, part.Items[0].Excluded)
+	assert.Equal(t, "a page", part.Items[1].Text)
+	assert.NotContains(t, raw, "window seat")
+}

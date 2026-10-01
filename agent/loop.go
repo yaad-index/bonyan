@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/yaad-index/bonyan/assemble"
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/hook"
@@ -74,6 +75,16 @@ type Agent struct {
 	Retry model.RetryPolicy
 	// Instructions are the system instructions.
 	Instructions content.Trusted
+	// History is the conversation before this run, oldest first. It holds no
+	// system message and no trusted text, and it is trimmed to the history
+	// budget a whole exchange at a time, oldest first.
+	History []model.Message
+	// Material is retrieved or fetched material for the run, most relevant
+	// first; what does not fit its budget is dropped from the end.
+	Material []content.Untrusted
+	// Context holds the token budget of each section of a call's context; the
+	// zero value means assemble.DefaultBudgets.
+	Context assemble.Budgets
 	// Tools the model may call; nil means none.
 	Tools Tools
 	// LoopThreshold is how many times the same tool call, by name and
@@ -149,6 +160,16 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	if err := defaultPolicy(a.Trust); err != nil {
 		return Outcome{}, Report{}, err
 	}
+	budgets := a.Context
+	if budgets == (assemble.Budgets{}) {
+		budgets = assemble.DefaultBudgets()
+	}
+	if err := budgets.Validate(); err != nil {
+		return Outcome{}, Report{}, err
+	}
+	if err := validHistory(a.History); err != nil {
+		return Outcome{}, Report{}, err
+	}
 	meter, err := budget.NewMeter(limits.Budget.MaxTokens, limits.Budget.MaxCostMicros, a.Prices)
 	if err != nil {
 		return Outcome{}, Report{}, err
@@ -178,7 +199,7 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	ctx, cancel := context.WithTimeout(ctx, limits.Deadline)
 	defer cancel()
 
-	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}}
+	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter}
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
 	out, rep := r.loop(ctx, limits.MaxSteps, input)
 	rep.Tokens, rep.Cost = meter.Spent()
@@ -214,6 +235,23 @@ type run struct {
 	hooks     *registry.Hooks
 	threshold int
 	seen      map[string]int
+	budgets   assemble.Budgets
+	counter   tokenize.Counter
+}
+
+// validHistory refuses history the pipeline cannot place.
+func validHistory(msgs []model.Message) error {
+	for _, m := range msgs {
+		if m.Role == model.RoleSystem {
+			return fmt.Errorf("%w: a system message in the history", assemble.ErrInvalidInput)
+		}
+		for _, p := range m.Parts {
+			if p.Trusted() {
+				return fmt.Errorf("%w: trusted text in the history", assemble.ErrInvalidInput)
+			}
+		}
+	}
+	return nil
 }
 
 func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (Outcome, Report) {
@@ -226,10 +264,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 	if len(v.Changed) > 0 {
 		input = v.Event.Message
 	}
-	msgs := []model.Message{
-		{Role: model.RoleSystem, Parts: []content.Text{r.a.Instructions}},
-		{Role: model.RoleUser, Parts: []content.Text{input}},
-	}
+	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.NewSection(labelUser, input)}}}
 	var tools []model.ToolDef
 	if r.a.Tools != nil {
 		tools = r.a.Tools.Definitions()
@@ -241,7 +276,19 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			rep.Err = err
 			return NotCleared(ReasonDeadline), rep
 		}
-		req := model.ChatRequest{Messages: msgs, Tools: tools, MaxOutputTokens: r.a.MaxOutputTokens}
+		req, dropped, err := assemble.Build(assemble.Input{
+			Instructions: r.a.Instructions,
+			Material:     r.a.Material,
+			Earlier:      r.a.History,
+			Current:      current,
+			Tools:        tools,
+		}, r.budgets, r.counter)
+		if err != nil {
+			rep.Err = err
+			return NotCleared(ReasonBudgetLimit), rep
+		}
+		r.recordDropped(dropped)
+		req.MaxOutputTokens = r.a.MaxOutputTokens
 		resp, reason, err := r.call(ctx, req)
 		if err != nil {
 			rep.Err = err
@@ -260,13 +307,13 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			return Answered(answer), rep
 		}
 
-		msgs = append(msgs, model.Message{Role: model.RoleAssistant, ToolCalls: resp.ToolCalls})
+		current = append(current, model.Message{Role: model.RoleAssistant, ToolCalls: resp.ToolCalls})
 		for _, tc := range resp.ToolCalls {
 			if r.looping(tc) {
 				rep.Err = fmt.Errorf("agent: tool call %q repeated %d times", tc.Name, r.threshold)
 				return NotCleared(ReasonLoopDetected), rep
 			}
-			msgs = append(msgs, r.runTool(ctx, tc))
+			current = append(current, r.runTool(ctx, tc))
 		}
 	}
 	return NotCleared(ReasonStepLimit), rep
@@ -332,6 +379,32 @@ func callKey(tc model.ToolCall) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// The labels of the sections the loop builds.
+const (
+	labelUser   = "user message"
+	labelResult = "tool result"
+)
+
+// recordDropped records every item left out of a call's context: its section,
+// source and size. assemble never reports a memory item's ID.
+func (r *run) recordDropped(dropped []assemble.Dropped) {
+	if r.a.Recorder == nil {
+		return
+	}
+	for _, d := range dropped {
+		r.a.Recorder.Event(record.Event{
+			Slot: "assemble", Name: d.Section, Decision: "dropped",
+			Source: string(d.Source.Kind), Item: d.Source.ID, Tokens: d.Tokens,
+		})
+	}
+}
+
+// toolMessage is the message answering call id with text, as a section.
+func toolMessage(id, text string) model.Message {
+	result := content.From(content.Provenance{Kind: content.KindTool, ID: id}, text)
+	return model.Message{Role: model.RoleTool, ToolCallID: id, Parts: []content.Text{content.NewSection(labelResult, result)}}
+}
+
 // The texts the model is given in place of a tool's result.
 const (
 	resultUnknown  = "error: unknown tool"
@@ -348,7 +421,7 @@ const (
 func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
 	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
 	if v.Denied != "" {
-		return model.ToolResult(tc.ID, resultDenied)
+		return toolMessage(tc.ID, resultDenied)
 	}
 	call := tc
 	if len(v.Changed) > 0 {
@@ -363,7 +436,7 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
 	case len(v.Changed) > 0:
 		text = v.Event.Result.Raw()
 	}
-	return model.ToolResult(tc.ID, text)
+	return toolMessage(tc.ID, text)
 }
 
 func (r *run) callTool(ctx context.Context, tc model.ToolCall) string {

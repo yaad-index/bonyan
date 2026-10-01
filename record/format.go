@@ -83,6 +83,10 @@ type Part struct {
 	Text       string      `json:"text,omitempty"`
 	Provenance *Provenance `json:"provenance,omitempty"`
 	Excluded   bool        `json:"excluded,omitempty"`
+	// Section and Items are set for a section of untrusted material: its
+	// label and its items, each recorded as an untrusted part.
+	Section string `json:"section,omitempty"`
+	Items   []Part `json:"items,omitempty"`
 }
 
 // Provenance is where an untrusted part came from.
@@ -142,6 +146,10 @@ type Event struct {
 	Source   string `json:"source,omitempty"`
 	Decision string `json:"decision,omitempty"`
 	Failure  string `json:"failure,omitempty"`
+	// Item and Tokens describe an item left out of a call's context: its
+	// source's ID (never for memory) and what it counted.
+	Item   string `json:"item,omitempty"`
+	Tokens int64  `json:"tokens,omitempty"`
 }
 
 func (r Response) usage() *model.Usage {
