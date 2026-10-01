@@ -122,9 +122,10 @@ func (Section) Trusted() bool { return false }
 func (Section) sealed() {}
 
 // Render returns the section with the default marking: a labelled opening and
-// closing line around it and a source line before each item. Both delimiter
-// lines carry a nonce derived from the section's own text, so an item cannot
-// contain the closing line, and the same section always renders the same way.
+// closing line around it and a source line before each item. Every one of
+// those lines carries a nonce derived from the section's own text, so an item
+// can neither close its section nor pass part of itself off as another item
+// from another source, and the same section always renders the same way.
 //
 // TODO(phase 9a, the trust policy in the run): the configured policy marks a
 // section at the enforcement point; this becomes the default policy's marking.
@@ -138,7 +139,7 @@ func (s Section) Render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<<untrusted %s %s>>\n", s.label, nonce)
 	for _, it := range s.items {
-		fmt.Fprintf(&b, "[source: %s", it.from.Kind)
+		fmt.Fprintf(&b, "[source %s: %s", nonce, it.from.Kind)
 		if it.from.ID != "" {
 			fmt.Fprintf(&b, " %s", it.from.ID)
 		}
