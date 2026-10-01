@@ -178,17 +178,23 @@ func (g guardedHook) apply(ev hook.Event, act hook.Action) (hook.Event, bool) {
 	return ev, true
 }
 
-// keepTrust checks that changed holds no trusted part the original did not and
-// no untrusted part with a provenance the original did not, and returns it with
-// its untrusted parts scrubbed.
+// keepTrust checks that changed raises no trust and moves none: every trusted
+// part must be one the original held in a message of the same role, every
+// untrusted part must carry a provenance the original held, and no untrusted
+// part may sit in a system message. It returns changed with its untrusted
+// parts scrubbed.
 func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]model.Message, bool) {
-	trusted := map[string]int{}
+	type placed struct {
+		role model.Role
+		text string
+	}
+	trusted := map[placed]int{}
 	provs := map[content.Provenance]bool{}
 	for _, m := range original {
 		for _, p := range m.Parts {
 			switch v := p.(type) {
 			case content.Trusted:
-				trusted[v.String()]++
+				trusted[placed{m.Role, v.String()}]++
 			case content.Untrusted:
 				provs[v.Provenance()] = true
 			}
@@ -200,13 +206,14 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 		for j, p := range m.Parts {
 			switch v := p.(type) {
 			case content.Trusted:
-				if trusted[v.String()] == 0 {
+				k := placed{m.Role, v.String()}
+				if trusted[k] == 0 {
 					return nil, false
 				}
-				trusted[v.String()]--
+				trusted[k]--
 				parts[j] = v
 			case content.Untrusted:
-				if !provs[v.Provenance()] {
+				if m.Role == model.RoleSystem || !provs[v.Provenance()] {
 					return nil, false
 				}
 				parts[j] = scrub.ScrubText(v)

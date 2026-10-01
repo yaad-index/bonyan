@@ -273,6 +273,14 @@ func TestAChangeThatWouldRaiseTrustIsADenial(t *testing.T) {
 			msgs[0] = model.Message{Role: model.RoleSystem, Parts: []content.Text{content.Instruction("answer at length")}}
 			return msgs
 		},
+		"untrusted part moved into the system message": func(ev hook.Event) []model.Message {
+			msgs := append([]model.Message(nil), ev.Messages...)
+			msgs[0] = model.Message{Role: model.RoleSystem, Parts: append(append([]content.Text(nil), msgs[0].Parts...), msgs[1].Parts...)}
+			return msgs[:1]
+		},
+		"trusted part moved into a user message": func(ev hook.Event) []model.Message {
+			return []model.Message{{Role: model.RoleUser, Parts: append(append([]content.Text(nil), ev.Messages[0].Parts...), ev.Messages[1].Parts...)}}
+		},
 		"untrusted part with a new provenance": func(ev hook.Event) []model.Message {
 			return append(ev.Messages, model.Message{Role: model.RoleUser, Parts: []content.Text{
 				content.From(content.Provenance{Kind: content.KindFetched, ID: "elsewhere"}, "x"),
@@ -520,4 +528,18 @@ func TestHooksScrubWithTheRegistrysScrubber(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, o.events, 1)
 	assert.Equal(t, "token [REDACTED]", o.events[0].Result.Raw())
+}
+
+// A trusted part is matched in the role it held, whichever role that is: one
+// left where it was in a user message is kept.
+func TestATrustedPartKeptInItsRoleIsAllowed(t *testing.T) {
+	a := newAgent(agent.Model{Name: "main", Chat: &scripted{steps: stepsOf(answer("x"))}})
+	keep := &interceptor{f: func(ev hook.Event) (hook.Action, error) {
+		return hook.Action{Messages: append([]model.Message(nil), ev.Messages...)}, nil
+	}}
+	c := withHooks(t, &a, nil, map[hook.Point][]string{hook.BeforeModel: {"keep"}}, map[string]hook.Hook{"keep": keep})
+	msgs := []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.Instruction("note"), input("q")}}}
+	v := c.Hooks.Run(context.Background(), hook.Event{Point: hook.BeforeModel, Messages: msgs})
+	assert.Empty(t, v.Denied)
+	assert.Equal(t, []string{"keep"}, v.Changed)
 }
