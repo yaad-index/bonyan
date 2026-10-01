@@ -117,9 +117,12 @@ is applied is not a slot.
 
 - **The policy decides three things:**
   - **classification:** which content is untrusted, by its source. The sources bonyan names are
-    program and operator instructions, user messages, uploads, fetched material, tool output and
-    recalled memory; a program can register further source kinds, and a policy can classify by any
-    of them;
+    program and operator instructions, user messages, uploads, fetched material, tool output, remote
+    tool output (returned by a tool served over the Model Context Protocol, §5) and recalled memory;
+    a program can register further source kinds, and a policy can classify by any of them. Remote
+    tool output is a source of its own so that a policy which trusts the program's own tools does
+    not trust every tool server along with them. Elsewhere in this ADR, "tool output" and "tool
+    result" include it;
   - **marking:** how untrusted content is delimited and presented inside its section (the delimiter
     format, labels, an encoding of the text);
   - **handling:** what else happens when untrusted content is present, for example requiring
@@ -138,7 +141,8 @@ is applied is not a slot.
 - **Every decision is recorded** in the trace and the recording: the source kind, the decision and
   the policy's name, never the content (§9).
 - **The default policy** classifies everything that did not come from the program or the operator
-  (user messages, uploads, fetched material, tool output, memory extracted from any of those) as
+  (user messages, uploads, fetched material, tool output, remote tool output, memory extracted from
+  any of those) as
   untrusted, marks it with a delimited, labelled section, and adds no further handling. A program
   that configures no policy gets exactly this.
 
@@ -182,6 +186,9 @@ Two other positions were considered and rejected:
   than the material it was extracted from. A fact extracted from untrusted material enters context
   inside the marked section, not as trusted memory. This is a rule of the memory interface, not left
   to each backend, so a fact planted by a fetched item cannot come back later as trusted context.
+  The recorded source names the kind of material the fact was extracted from, remote tool output
+  included, so a fact from a tool server is classified again as remote tool output and never as the
+  program's own tool output.
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
   and its source; a retention period is configurable; deletion by subject is **required to
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
@@ -198,7 +205,19 @@ Two other positions were considered and rejected:
 
 - A tool registry with typed inputs and outputs (JSON Schema derived from Go types).
 - An **MCP client**, so tools served over the Model Context Protocol are registered the same way as
-  in-process tools.
+  in-process tools, except in what the server controls:
+  - their results are remote tool output (§3), not tool output. An error result is the server's
+    output like any other and enters the same way;
+  - text the server writes into a tool's definition reaches the model in instruction position,
+    outside any marked section. By default bonyan keeps only what a call needs to be valid, at every
+    level of the definition, and drops the rest: the tool's description, and in each schema every
+    keyword validation does not use, among them description, title, examples, default, `$comment`
+    and any keyword the server invents. What stays is the tool's name (under a prefix the program
+    chooses), property names, enum and const values, patterns, formats, the names of the
+    definitions a reference points to, and the identifiers and anchors a reference resolves
+    through; that is the server-written text that still reaches the model. A program can keep
+    everything for a given server; doing so is the program accepting untrusted text in instruction
+    position.
 - Each tool declares what it may touch: secrets by name, network, filesystem. **Only secrets are
   enforced**, because bonyan is what resolves them (§10). Network and filesystem declarations are
   metadata for review and approval, not a sandbox: in-process Go code can open a socket or a file
@@ -439,3 +458,9 @@ attached in code.
 - §12: what a hook may do is stated for each point; a change never raises trust; several hooks at
   one point see each other's changes and the first denial ends the point; what a hook changes is
   scrubbed again after it; a failing hook after a tool call withholds the result.
+- §3, §4, §5: remote tool output is a source of its own, untrusted under the default policy and kept
+  as a recalled fact's source; of the text a tool server writes into a tool's definition, only
+  what a call needs to be valid is kept by default (the tool's name, property names, enum and const
+  values, patterns, formats, referenced definition names, and the identifiers and anchors a
+  reference resolves through), and keeping the rest for a server is the program accepting untrusted
+  text in instruction position.
