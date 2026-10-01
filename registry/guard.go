@@ -180,8 +180,9 @@ func (g guardedHook) apply(ev hook.Event, act hook.Action) (hook.Event, bool) {
 
 // keepTrust checks that changed raises no trust and moves none: every trusted
 // part must be one the original held in a message of the same role, every
-// untrusted part must carry a provenance the original held, and no untrusted
-// part may sit in a system message. It returns changed with its untrusted
+// untrusted item must carry a provenance the original held, no untrusted part
+// or section may sit in a system message, and an item may leave a section only
+// if the original already held it bare. It returns changed with its untrusted
 // parts scrubbed.
 func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]model.Message, bool) {
 	type placed struct {
@@ -190,6 +191,7 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 	}
 	trusted := map[placed]int{}
 	provs := map[content.Provenance]bool{}
+	bare := map[content.Provenance]bool{}
 	for _, m := range original {
 		for _, p := range m.Parts {
 			switch v := p.(type) {
@@ -197,6 +199,11 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 				trusted[placed{m.Role, v.String()}]++
 			case content.Untrusted:
 				provs[v.Provenance()] = true
+				bare[v.Provenance()] = true
+			case content.Section:
+				for _, it := range v.Items() {
+					provs[it.Provenance()] = true
+				}
 			}
 		}
 	}
@@ -213,8 +220,18 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 				trusted[k]--
 				parts[j] = v
 			case content.Untrusted:
-				if m.Role == model.RoleSystem || !provs[v.Provenance()] {
+				if m.Role == model.RoleSystem || !bare[v.Provenance()] {
 					return nil, false
+				}
+				parts[j] = scrub.ScrubText(v)
+			case content.Section:
+				if m.Role == model.RoleSystem {
+					return nil, false
+				}
+				for _, it := range v.Items() {
+					if !provs[it.Provenance()] {
+						return nil, false
+					}
 				}
 				parts[j] = scrub.ScrubText(v)
 			default:

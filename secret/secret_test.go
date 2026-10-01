@@ -304,3 +304,16 @@ func TestScrubberIsSafeForConcurrentUse(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, "[REDACTED] [REDACTED]", r.Scrubber().Scrub("value-1-x value-49-x"))
 }
+
+func TestASectionIsScrubbedItemByItem(t *testing.T) {
+	r := secret.NewResolver(&countingSource{values: map[string]string{"api_key": "key-9f8e7d"}})
+	_, err := r.Scope("api_key").Resolve(context.Background(), "api_key")
+	require.NoError(t, err)
+	src := content.Provenance{Kind: content.KindTool, ID: "call-1"}
+	out, ok := r.Scrubber().ScrubText(content.NewSection("tool result", content.From(src, "Bearer key-9f8e7d"))).(content.Section)
+	require.True(t, ok, "a section stays a section")
+	assert.Equal(t, "tool result", out.Label())
+	require.Len(t, out.Items(), 1)
+	assert.Equal(t, "Bearer [REDACTED]", out.Items()[0].Raw())
+	assert.Equal(t, src, out.Items()[0].Provenance())
+}

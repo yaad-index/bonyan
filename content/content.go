@@ -18,6 +18,14 @@
 // not about what a program chooses to do with raw strings.
 package content
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"strings"
+)
+
 // Text is a piece of content that is either Trusted or Untrusted. It is sealed:
 // only this package's types implement it, so every Text a caller holds is one
 // of the two.
@@ -89,3 +97,56 @@ func (u Untrusted) Provenance() Provenance { return u.from }
 func (Untrusted) Trusted() bool { return false }
 
 func (Untrusted) sealed() {}
+
+// Section is untrusted material grouped under a label: the only way untrusted
+// text enters assembled context (ADR 0001 §3). It is untrusted as a whole.
+type Section struct {
+	label string
+	items []Untrusted
+}
+
+// NewSection groups items under label.
+func NewSection(label string, items ...Untrusted) Section {
+	return Section{label: label, items: append([]Untrusted(nil), items...)}
+}
+
+// Label is what the section holds, such as "material" or "tool result".
+func (s Section) Label() string { return s.label }
+
+// Items returns the section's untrusted items, in order.
+func (s Section) Items() []Untrusted { return append([]Untrusted(nil), s.items...) }
+
+// Trusted is always false: a section holds untrusted material.
+func (Section) Trusted() bool { return false }
+
+func (Section) sealed() {}
+
+// Render returns the section with the default marking: a labelled opening and
+// closing line around it and a source line before each item. Every one of
+// those lines carries a nonce derived from the section's own text, so an item
+// can neither close its section nor pass part of itself off as another item
+// from another source, and the same section always renders the same way.
+//
+// TODO(phase 9a, the trust policy in the run): the configured policy marks a
+// section at the enforcement point; this becomes the default policy's marking.
+func (s Section) Render() string {
+	h := sha256.New()
+	_, _ = io.WriteString(h, s.label)
+	for _, it := range s.items {
+		_, _ = fmt.Fprintf(h, "\x00%s\x00%s\x00%s\x00%s", it.from.Kind, it.from.Origin, it.from.ID, it.s)
+	}
+	nonce := hex.EncodeToString(h.Sum(nil))[:12]
+	var b strings.Builder
+	fmt.Fprintf(&b, "<<untrusted %s %s>>\n", s.label, nonce)
+	for _, it := range s.items {
+		fmt.Fprintf(&b, "[source %s: %s", nonce, it.from.Kind)
+		if it.from.ID != "" {
+			fmt.Fprintf(&b, " %s", it.from.ID)
+		}
+		b.WriteString("]\n")
+		b.WriteString(it.s)
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "<<end untrusted %s %s>>", s.label, nonce)
+	return b.String()
+}

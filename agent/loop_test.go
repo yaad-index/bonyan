@@ -103,6 +103,22 @@ func newAgent(models ...agent.Model) agent.Agent {
 	}
 }
 
+// item returns the one untrusted item of a section part.
+func item(p content.Text) (content.Untrusted, bool) {
+	s, ok := p.(content.Section)
+	if !ok || len(s.Items()) != 1 {
+		return content.Untrusted{}, false
+	}
+	return s.Items()[0], true
+}
+
+func mustItem(t *testing.T, p content.Text) content.Untrusted {
+	t.Helper()
+	u, ok := item(p)
+	require.True(t, ok, "a section holding one item, got %T", p)
+	return u
+}
+
 func input(s string) content.Untrusted {
 	return content.From(content.Provenance{Kind: content.KindUser, ID: "m1"}, s)
 }
@@ -124,10 +140,11 @@ func TestAnswerAfterAToolRoundTrip(t *testing.T) {
 	require.Len(t, second, 4)
 	assert.Equal(t, model.RoleAssistant, second[2].Role)
 	assert.Equal(t, "search", second[2].ToolCalls[0].Name)
-	res, ok := second[3].Parts[0].(content.Untrusted)
+	res, ok := item(second[3].Parts[0])
 	require.True(t, ok, "tool output is untrusted")
 	assert.Equal(t, "found it", res.Raw())
 	assert.Equal(t, content.Provenance{Kind: content.KindTool, ID: second[2].ToolCalls[0].ID}, res.Provenance())
+	assert.Equal(t, "tool result", second[3].Parts[0].(content.Section).Label())
 }
 
 // Every non-answer this phase can produce is a not-cleared outcome with its
@@ -342,7 +359,7 @@ func TestToolResults(t *testing.T) {
 	results := map[string]string{}
 	for _, msg := range m.reqs[1].Messages {
 		if msg.Role == model.RoleTool {
-			results[msg.ToolCallID] = msg.Parts[0].(content.Untrusted).Raw()
+			results[msg.ToolCallID] = mustItem(t, msg.Parts[0]).Raw()
 		}
 	}
 	assert.Equal(t, "token [REDACTED]", results["a"], "tool output is scrubbed before it enters context")

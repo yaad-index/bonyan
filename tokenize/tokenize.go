@@ -74,6 +74,8 @@ func text(p content.Text) string {
 		return v.String()
 	case content.Untrusted:
 		return v.Raw()
+	case content.Section:
+		return v.Render()
 	}
 	return ""
 }

@@ -365,3 +365,17 @@ func mustJSON(t *testing.T, v any) string {
 	require.NoError(t, err)
 	return string(b)
 }
+
+func TestASectionIsSentWithItsMarking(t *testing.T) {
+	s, c := start(t, reply(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	sec := content.NewSection("material", content.From(content.Provenance{Kind: content.KindFetched, ID: "d"}, "page"))
+	_, err := c.Chat(context.Background(), model.ChatRequest{
+		Messages:        []model.Message{system("be brief"), {Role: model.RoleUser, Parts: []content.Text{sec}}},
+		MaxOutputTokens: 10,
+	})
+	require.NoError(t, err)
+	msgs, ok := s.bodies[0]["messages"].([]any)
+	require.True(t, ok)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, sec.Render(), msgs[1].(map[string]any)["content"])
+}

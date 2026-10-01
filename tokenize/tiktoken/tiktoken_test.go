@@ -125,3 +125,14 @@ func TestSafeForConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestASectionCountsAsItRenders(t *testing.T) {
+	c, err := tiktoken.New("cl100k_base", 0)
+	require.NoError(t, err)
+	s := content.NewSection("material", content.From(content.Provenance{Kind: content.KindFetched, ID: "d"}, "a page of text"))
+	asSection, err := c.Count(model.ChatRequest{Messages: []model.Message{{Role: model.RoleUser, Parts: []content.Text{s}}}})
+	require.NoError(t, err)
+	asText, err := c.Count(model.ChatRequest{Messages: []model.Message{user(s.Render())}})
+	require.NoError(t, err)
+	assert.Equal(t, asText, asSection)
+}
