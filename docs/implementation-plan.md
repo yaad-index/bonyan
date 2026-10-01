@@ -121,8 +121,11 @@ The ordered pipeline with per-section token budgets, deterministic recorded trim
 *Tests:* trimming is identical across runs and says what was dropped; untrusted material only ever appears inside the marked section.
 
 ### Phase 9a: the trust policy in the run
-Classification through the configured policy where content enters the run (the input and each tool result), every decision recorded with the policy's name, the policy's marking of untrusted sections, and the enforcement point as the last step before every model request (ADR 0001 §3). The loop's refusal of a policy other than the default is lifted here. Handling that requires approval uses phase 14's hook once it exists; recalled memory is classified through the same policy in phase 12.
+Classification through the configured policy where content enters the run (the input and each tool result), every decision recorded with the policy's name, the policy's marking of untrusted sections, and the enforcement point as the last step before every model request (ADR 0001 §3). The loop's refusal of a policy other than the default is lifted here. Handling in this phase can drop an item or refuse the call. Handling that requires approval uses phase 14's hook once it exists; recalled memory is classified through the same policy in phase 12; sending the call to a different configured model is the later item below.
 *Tests:* a policy declaring a source trusted changes the value's type and the decision is recorded; a failing policy leaves content untrusted and marked as the default policy marks it; a request with untrusted content outside a marked section is refused at the enforcement point; a hook or pipeline stage cannot send a request around it.
+
+### Later: routing as trust handling
+A trust policy's handling may send a call carrying untrusted content to a different configured model (ADR 0001 §3). It needs a way to name the models a policy may route to, and it comes after phase 9a.
 
 ### Phase 10: tools and structured output
 The registry with schemas generated from Go types, per-tool secret grants, and structured-output validation with bounded retries. Adds the JSON Schema dependency.
