@@ -16,12 +16,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/hook"
+	"github.com/yaad-index/bonyan/memory"
+	"github.com/yaad-index/bonyan/memory/inmem"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
@@ -41,7 +45,11 @@ const (
 	SlotHook       = "hook"
 	SlotSecret     = "secret"
 	SlotRecording  = "recording"
+	SlotMemory     = "memory"
 )
+
+// MemoryInMem is the name the in-process memory backend is registered under.
+const MemoryInMem = "inmem"
 
 // The names the built-in secret sources are registered under. "dir" takes the
 // option {"path": "<directory>"}.
@@ -142,11 +150,12 @@ type Registry struct {
 	hooks       *slot[hook.Hook]
 	secrets     *slot[secret.Source]
 	sinks       *slot[record.Sink]
+	memories    *slot[memory.Backend]
 }
 
 // New returns a registry holding only the built-ins: the default trust policy,
-// under trust.DefaultName, the environment and directory secret sources, and
-// the file recording sink.
+// under trust.DefaultName, the environment and directory secret sources, the
+// file recording sink and the in-process memory backend.
 func New() *Registry {
 	r := &Registry{
 		chat:        newSlot[model.Chat](SlotChat),
@@ -156,6 +165,7 @@ func New() *Registry {
 		hooks:       newSlot[hook.Hook](SlotHook),
 		secrets:     newSlot[secret.Source](SlotSecret),
 		sinks:       newSlot[record.Sink](SlotRecording),
+		memories:    newSlot[memory.Backend](SlotMemory),
 	}
 	r.policies.factories[trust.DefaultName] = func(json.RawMessage) (trust.Policy, error) {
 		return trust.Default{}, nil
@@ -165,6 +175,9 @@ func New() *Registry {
 	}
 	r.secrets.factories[SecretDir] = dirSource
 	r.sinks.factories[SinkFile] = fileSink
+	r.memories.factories[MemoryInMem] = func(json.RawMessage) (memory.Backend, error) {
+		return inmem.New(), nil
+	}
 	return r
 }
 
@@ -234,6 +247,13 @@ func (r *Registry) RegisterSink(name string, f Factory[record.Sink]) error {
 	return r.sinks.register(name, f)
 }
 
+// RegisterMemory adds a memory backend under name.
+func (r *Registry) RegisterMemory(name string, f Factory[memory.Backend]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.memories.register(name, f)
+}
+
 // SlotConfig selects one implementation for a slot and carries its options.
 type SlotConfig struct {
 	Impl    string          `json:"impl"`
@@ -258,6 +278,16 @@ type Config struct {
 	// Recording selects the sink model calls and wrapper events are recorded
 	// to. With none, nothing is recorded.
 	Recording *SlotConfig `json:"recording,omitempty"`
+	// Memory selects the memory backend. With none, the agent has no memory.
+	Memory *MemoryConfig `json:"memory,omitempty"`
+}
+
+// MemoryConfig selects the memory backend and how long it keeps records.
+type MemoryConfig struct {
+	SlotConfig
+	// Retention is how long a record is kept, as a Go duration such as
+	// "720h". It is required.
+	Retention string `json:"retention"`
 }
 
 // Components are the assembled parts. Every value is bonyan's wrapper around the
@@ -279,18 +309,29 @@ type Components struct {
 	// classifier calls and the wrappers' events are recorded; embedder calls
 	// are not.
 	Recorder *record.Recorder
+	// Memory is the store over the configured backend, classifying through
+	// Trust. It is nil when no memory is configured.
+	Memory *memory.Store
 
 	// owned is a sink the registry opened, which Close closes.
 	owned record.Sink
+	// backend is the memory backend the registry built, which Close closes
+	// when it can be closed.
+	backend memory.Backend
 }
 
 // Close closes the recording sink if the registry opened it from
-// configuration. A sink passed with WithSink is the program's to close.
+// configuration, and the memory backend if it can be closed. A sink passed
+// with WithSink is the program's to close.
 func (c Components) Close() error {
-	if c.owned == nil {
-		return nil
+	var errs []error
+	if c.owned != nil {
+		errs = append(errs, c.owned.Close())
 	}
-	return c.owned.Close()
+	if cl, ok := c.backend.(io.Closer); ok {
+		errs = append(errs, cl.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // Hooks holds the hooks configuration attached to each point, in order.
@@ -435,6 +476,17 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		}
 	}
 
+	var backend memory.Backend
+	var retention time.Duration
+	if cfg.Memory != nil {
+		if retention, err = time.ParseDuration(cfg.Memory.Retention); err != nil || retention <= 0 {
+			return Components{}, fmt.Errorf("registry: memory retention %q: must be a positive duration", cfg.Memory.Retention)
+		}
+		if backend, err = r.memories.build(cfg.Memory.SlotConfig); err != nil {
+			return Components{}, err
+		}
+	}
+
 	secretCfgs := cfg.Secrets
 	if len(secretCfgs) == 0 {
 		secretCfgs = []SlotConfig{{Impl: SecretEnv}}
@@ -481,6 +533,14 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		out.Classifier = guardClassifier(cls)
 	}
 	out.Trust = guardPolicy(policyCfg.Impl, policy, ev)
+	if backend != nil {
+		store, err := memory.NewStore(backend, memory.Options{Policy: out.Trust, PolicyName: policyCfg.Impl, Retention: retention})
+		if err != nil {
+			_ = out.Close()
+			return Components{}, err
+		}
+		out.Memory, out.backend = store, backend
+	}
 	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber()}
 	for point, list := range hooks {
 		for _, x := range list {
@@ -509,6 +569,8 @@ func (r *Registry) Names(slotName string) []string {
 		return r.secrets.names()
 	case SlotRecording:
 		return r.sinks.names()
+	case SlotMemory:
+		return r.memories.names()
 	}
 	return nil
 }

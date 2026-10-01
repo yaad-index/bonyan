@@ -13,7 +13,7 @@ import (
 	"github.com/yaad-index/bonyan/model"
 )
 
-// TODO(phase 12, memory; phase 14, approvals): the payloads and rights of the
+// TODO(phase 12a, memory; phase 14, approvals): the payloads and rights of the
 // memory and approval points. Nothing calls them before then.
 
 // Point is a place in a run where hooks are called.
