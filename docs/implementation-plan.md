@@ -132,8 +132,11 @@ The registry with schemas generated from Go types, per-tool secret grants, and s
 *Tests:* an invalid structured response is retried with the validation error and then fails typed; the known generator gaps (§3) have a test each.
 
 ### Phase 11: the tool-server protocol client
-The adapter registering remote tools like in-process ones. Adds the protocol SDK.
-*Tests:* against the SDK's in-memory server: list, call, error result; remote tool output enters context as untrusted.
+The adapter registering remote tools like in-process ones, from a tool list read once at registration, under a prefix the program chooses. Adds the protocol SDK. The tool registry gains registration from a JSON Schema, with the same argument validation and secret scoping as a Go-typed tool. Results, error results included, are remote tool output (ADR 0001 §3), a source kind only this adapter sets. The text a server writes into a tool's definition is stripped by default at every level (description, title, examples, default, `$comment`); property names and enum values stay, and keeping the rest is a per-server opt-in (ADR 0001 §5).
+*Tests:* against the SDK's in-memory server: list, call, error result; remote tool output enters context as untrusted, under its own source kind; stripped fields are absent at every level and kept with the opt-in; invalid arguments are refused before the request is sent; a clashing name fails registration.
+
+### Later: trust per tool server
+A policy that trusts one tool server and not another. A policy sees the source kind, not the server, so it needs a way to name servers to a policy, and it comes after phase 11.
 
 ### Phase 12: memory interface and conformance suite
 Short-term and long-term layers, subject and source on every record, recall re-marking by source, retention, and delete by subject. A conformance suite every backend must pass.
