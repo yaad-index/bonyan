@@ -355,20 +355,33 @@ attached in code.
   - before and after each tool call;
   - approval (§7): an action that needs approval is handed to the approver through this point;
   - memory write and memory recall (§4).
-- **What a hook may do** is stated per point: observe; change the payload (rewrite a message, redact
-  a reply, adjust tool arguments); or deny (a denied tool call is reported to the model as denied; a
-  denied model call, message or reply ends the run with a typed error, and for a gate-type agent
-  that is one more not-cleared case, §7). Several hooks at one point run in their configured order,
-  and any denial wins.
+- **What a hook may do** is fixed per point. Every hook may observe; beyond that:
+  - run start and run end: observe only;
+  - user message in: change the message, or deny, which ends the run with a typed error;
+  - before a model call: change the request, or deny, which ends the run with a typed error;
+  - after a model call: observe only; what reaches the caller is redacted at reply out;
+  - before a tool call: change the arguments, or deny, which reports the call to the model as
+    denied;
+  - after a tool call: change the result (sanitise or trim it) before it enters context;
+  - reply out: change the reply (redact it), or deny, which ends the run with a typed error;
+  - approval, memory write and memory recall: what a hook may do there is stated with the approval
+    flow (§7) and memory (§4), and hooks are not called at these points before those are built.
+
+  A run ended by a denial is, for a gate-type agent, one more not-cleared case (§7).
+- **Several hooks at one point** run in their configured order. Each sees the payload as the hook
+  before it left it, and the first denial ends the point: the hooks after it there do not run.
 - **What a hook receives:**
   - content as typed values: what the policy classified untrusted arrives as untrusted, with its
     provenance, and trusted text as trusted (§3);
   - content after secret scrubbing (§10): tool results, model responses and requests have had every
-    resolved secret removed before a hook sees them, and bonyan never hands a hook a secret;
+    resolved secret removed before a hook sees them, and bonyan never hands a hook a secret. What a
+    hook changes is scrubbed again after it, so a hook cannot put a resolved secret back;
   - memory contents at the memory hook points, and inside a request wherever the request carries
     them. A hook is code running in the program's process: like the program's own logging (§4), what
     a hook does with content it is handed is outside bonyan's reach. bonyan's own exporters and
     recorders still exclude memory (§4, §9).
+- **A change never raises trust.** Changed content keeps the provenance of what it replaced, and
+  nothing a hook adds becomes trusted.
 - **No hook API returns trusted content from untrusted content.** A hook that changes a payload
   returns the same types it was given: where it received an untrusted value it can return only an
   untrusted value, with provenance. Content a hook adds is recorded with the hook's name. The limit
@@ -381,7 +394,9 @@ attached in code.
 - **What is approved is what runs.** Before-tool-call hooks run first, then approval, then the tool;
   nothing changes a tool call after it is approved.
 - **A failing hook fails closed.** A hook that errors or panics at a point where it may change or
-  deny counts as a denial. An observe-only hook's failure is recorded and does not change the run.
+  deny counts as a denial. After a tool call, where a hook may change but not deny, that denial
+  withholds the result: the model is told the result was withheld, as it is told a call was denied.
+  An observe-only hook's failure is recorded and does not change the run.
 - **Re-runs (§8):** hooks do not run in a re-run unless opted in per hook, as with live tool
   execution, so a re-run does not reach a user or an outside service through a front-end.
 
@@ -421,3 +436,6 @@ attached in code.
   bound, unless the adapter shows the request never reached the provider; the bound, which before
   only refused calls, stands in for a charge in that case.
 - §12: hooks, new.
+- §12: what a hook may do is stated for each point; a change never raises trust; several hooks at
+  one point see each other's changes and the first denial ends the point; what a hook changes is
+  scrubbed again after it; a failing hook after a tool call withholds the result.
