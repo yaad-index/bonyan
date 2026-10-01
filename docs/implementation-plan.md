@@ -112,9 +112,17 @@ The thin HTTP client: messages, tool calls, response schema, max output tokens, 
 Context → model → tools → stop, with step, budget and deadline limits, inline loop detection with a configurable threshold, and the not-cleared result for gate agents. Built and tested on the replay model.
 *Tests:* every non-answer listed in ADR 0001 §7 yields not-cleared; the step limit ends a looping run even with loop detection off.
 
+### Phase 8a: hook points
+The payload of each hook point, the change and deny results, and the loop acting on them (ADR 0001 §12). A denied tool call is reported to the model as denied; a denied model call, message or reply ends the run with a typed error, which for a gate agent is not-cleared. The change and deny interfaces land together with the loop's handling of them, so no configured hook can ask for a change the loop ignores.
+*Tests:* each point receives its payload as typed values after secret scrubbing; a hook given untrusted content can return only untrusted content; with several hooks at a point, any denial wins; a failing hook that may change or deny counts as a denial, and an observing hook's failure is recorded and changes nothing.
+
 ### Phase 9: context assembly
 The ordered pipeline with per-section token budgets, deterministic recorded trimming, and the untrusted section wrapper.
 *Tests:* trimming is identical across runs and says what was dropped; untrusted material only ever appears inside the marked section.
+
+### Phase 9a: the trust policy in the run
+Classification through the configured policy where content enters the run (the input and each tool result), every decision recorded with the policy's name, the policy's marking of untrusted sections, and the enforcement point as the last step before every model request (ADR 0001 §3). The loop's refusal of a policy other than the default is lifted here. Handling that requires approval uses phase 14's hook once it exists; recalled memory is classified through the same policy in phase 12.
+*Tests:* a policy declaring a source trusted changes the value's type and the decision is recorded; a failing policy leaves content untrusted and marked as the default policy marks it; a request with untrusted content outside a marked section is refused at the enforcement point; a hook or pipeline stage cannot send a request around it.
 
 ### Phase 10: tools and structured output
 The registry with schemas generated from Go types, per-tool secret grants, and structured-output validation with bounded retries. Adds the JSON Schema dependency.
@@ -153,7 +161,7 @@ Repeated and parameter-grid re-runs of a recorded input. Tools are answered from
 
 ## 6. Order and parallelism
 
-Phases 0 and 1 come first, in that order. Phases 2 and 3 are the foundation for everything else. After them, 4 to 7 can proceed in parallel; 8 needs 5 and 6; 9 needs 8; 10 and 11 need 8; 12 is independent of the loop, and 13 needs 12 and the phase 1 decision; 14 needs 8; 15 can start once 8 exists; 16 to 18 come last. No program migrates to bonyan within this plan.
+Phases 0 and 1 come first, in that order. Phases 2 and 3 are the foundation for everything else. After them, 4 to 7 can proceed in parallel; 8 needs 5 and 6; 9 needs 8; 8a needs 8, and 9a needs 9; 10 and 11 need 8; 12 is independent of the loop, and 13 needs 12 and the phase 1 decision; 14 needs 8; 15 can start once 8 exists; 16 to 18 come last. No program migrates to bonyan within this plan.
 
 ## 7. Open points
 
