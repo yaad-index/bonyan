@@ -118,6 +118,8 @@ func TestAnswerAfterAToolRoundTrip(t *testing.T) {
 	assert.Equal(t, "done", got)
 	assert.Equal(t, 2, rep.Steps)
 	assert.Equal(t, int64(30), rep.Tokens, "two calls, each charged its reported usage")
+	require.Len(t, m.reqs[0].Tools, 1, "the model is told about the tools")
+	assert.Equal(t, "search", m.reqs[0].Tools[0].Name)
 
 	second := m.reqs[1].Messages
 	require.Len(t, second, 4)
@@ -234,6 +236,43 @@ type blocking struct{}
 func (blocking) Chat(ctx context.Context, _ model.ChatRequest) (model.ChatResponse, error) {
 	<-ctx.Done()
 	return model.ChatResponse{}, &model.CallError{Kind: model.ErrTimeout, Err: ctx.Err()}
+}
+
+// waitingTools holds every call until the run's deadline has passed.
+type waitingTools struct{ tools }
+
+func (w *waitingTools) Call(ctx context.Context, _ model.ToolCall) (string, error) {
+	<-ctx.Done()
+	return "late", nil
+}
+
+// A deadline that passes during a tool call ends the run before the next
+// model call, even with a model that does not watch its context.
+func TestDeadlinePassingInAToolEndsTheRun(t *testing.T) {
+	m := &scripted{steps: stepsOf(toolCall("search", `{"q":"x"}`), answer("done"))}
+	a := newAgent(agent.Model{Name: "main", Chat: m})
+	a.Tools = &waitingTools{}
+	a.Limits = agent.DefaultLimits()
+	a.Limits.Deadline = 20 * time.Millisecond
+	out, rep, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonDeadline, out.Reason())
+	assert.ErrorIs(t, rep.Err, context.DeadlineExceeded)
+	assert.Equal(t, 1, m.n, "no model call after the deadline")
+}
+
+// Retries sit outside the budget, so a failed attempt is charged its bound
+// as well as the one that answers.
+func TestEveryRetryAttemptIsCharged(t *testing.T) {
+	flaky := &model.CallError{Kind: model.ErrTransport, Retryable: true, Err: errors.New("reset")}
+	m := &scripted{steps: stepsOf(fail(flaky), answer("done"))}
+	a := newAgent(agent.Model{Name: "main", Chat: m})
+	a.Retry = model.RetryPolicy{Attempts: 2}
+	out, rep, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	require.True(t, out.Cleared(), out.String())
+	assert.Equal(t, 2, m.n)
+	assert.Greater(t, rep.Tokens, int64(15), "the failed attempt's bound is charged beside the answer's usage")
 }
 
 // With loop detection off, the step limit still ends a run that repeats itself.

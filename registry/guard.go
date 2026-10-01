@@ -52,6 +52,9 @@ func guardPolicy(name string, p trust.Policy, rec events) trust.Policy {
 	return guardedPolicy{name: name, inner: p, rec: rec}
 }
 
+// Name is the name the policy was configured under.
+func (g guardedPolicy) Name() string { return g.name }
+
 // Classify never returns an error: a failed classification is an untrusted one.
 func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) (trust.Decision, error) {
 	d, failure := call(ctx, func() (trust.Decision, error) { return g.inner.Classify(ctx, source) })

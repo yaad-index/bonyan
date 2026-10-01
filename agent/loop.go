@@ -15,12 +15,23 @@ import (
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/tokenize"
+	"github.com/yaad-index/bonyan/trust"
 )
 
 // TODO(phase 10, tools and structured output): replace Tools with the tool
 // registry, and add the invalid-output non-answer.
 // TODO(phase 14, approvals): add the approval hook and the approver-timeout
 // non-answer.
+// TODO(phase: trust policy, next to context assembly): classify the input and
+// every tool result through Agent.Trust, record each decision, add the
+// enforcement point before every model request, and drop ErrTrustPolicy.
+// TODO(phase: hook points, next to the agent loop): hand each point its
+// payload and act on change and deny.
+
+// ErrTrustPolicy is what Run returns for a trust policy other than the
+// default. The loop classifies as the default policy does, and refuses another
+// policy rather than ignore it until the trust-policy phase applies it.
+var ErrTrustPolicy = errors.New("agent: only the default trust policy is supported until the trust-policy phase")
 
 // Tools is what the loop needs from the tools an agent may call.
 type Tools interface {
@@ -71,6 +82,9 @@ type Agent struct {
 	// DefaultLoopThreshold; a negative value switches detection off, which
 	// leaves the step limit in force.
 	LoopThreshold int
+	// Trust is the trust policy; nil means the default. Run refuses any other
+	// (ErrTrustPolicy).
+	Trust trust.Policy
 	// Recorder records every call; nil records nothing.
 	Recorder *record.Recorder
 	// Hooks observe the run; nil runs none.
@@ -119,6 +133,9 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 			return Outcome{}, Report{}, err
 		}
 	}
+	if err := defaultPolicy(a.Trust); err != nil {
+		return Outcome{}, Report{}, err
+	}
 	meter, err := budget.NewMeter(limits.Budget.MaxTokens, limits.Budget.MaxCostMicros, a.Prices)
 	if err != nil {
 		return Outcome{}, Report{}, err
@@ -158,6 +175,21 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	rep.Tokens, rep.Cost = meter.Spent()
 	hooks.Run(ctx, hook.Event{Point: hook.RunEnd})
 	return out, rep, nil
+}
+
+// defaultPolicy accepts no policy, the default one, or a wrapper reporting
+// that it was configured as the default, as the registry's does.
+func defaultPolicy(p trust.Policy) error {
+	switch p := p.(type) {
+	case nil, trust.Default, *trust.Default:
+		return nil
+	case interface{ Name() string }:
+		if p.Name() == trust.DefaultName {
+			return nil
+		}
+		return fmt.Errorf("%w: got %q", ErrTrustPolicy, p.Name())
+	}
+	return fmt.Errorf("%w: got %T", ErrTrustPolicy, p)
 }
 
 type noHooks struct{}

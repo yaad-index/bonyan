@@ -12,8 +12,6 @@ import (
 // charged after it returns. A refused call never reaches the model. A call
 // that fails is charged its bound, unless the error is a model.CallError with
 // NotSent set, meaning the request never reached the endpoint (ADR 0001 §11).
-//
-// TODO(phase 8, the agent loop): the loop applies this per run.
 func Chat(inner model.Chat, modelName string, meter *Meter, counter tokenize.Counter) model.Chat {
 	return budgetedChat{inner: inner, name: modelName, meter: meter, counter: counter}
 }
