@@ -19,6 +19,7 @@ import (
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
+	"github.com/yaad-index/bonyan/tool"
 )
 
 // scripted answers with the next step, and repeats the last one after that.
@@ -88,7 +89,7 @@ func (t *tools) Call(_ context.Context, tc model.ToolCall) (string, error) {
 	if out, ok := t.out[tc.Name]; ok {
 		return out, nil
 	}
-	return "", agent.ErrUnknownTool
+	return "", tool.ErrUnknown
 }
 
 var prices = budget.PriceTable{"main": {Input: 1_000_000, Output: 1_000_000}, "backup": {Input: 1_000_000, Output: 1_000_000}}

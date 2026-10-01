@@ -17,24 +17,23 @@ import (
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/tokenize"
+	"github.com/yaad-index/bonyan/tool"
 	"github.com/yaad-index/bonyan/trust"
 )
 
-// TODO(phase 10, tools and structured output): replace Tools with the tool
-// registry, and add the invalid-output non-answer.
 // TODO(phase 14, approvals): add the approval hook and the approver-timeout
 // non-answer.
 // Tools is what the loop needs from the tools an agent may call.
+// *tool.Registry is bonyan's: it validates arguments against each tool's
+// schema and gives each tool only the secrets it declared (ADR 0001 §5).
 type Tools interface {
 	// Definitions describes the tools to the model.
 	Definitions() []model.ToolDef
 	// Call runs one tool call and returns its output. An error is reported
-	// to the model as a failed call; it does not end the run.
+	// to the model by kind (tool.ErrUnknown, tool.ErrInvalidArguments with
+	// its path and rule, or a failure); it does not end the run.
 	Call(ctx context.Context, call model.ToolCall) (string, error)
 }
-
-// ErrUnknownTool is what Tools.Call returns for a name it does not provide.
-var ErrUnknownTool = errors.New("agent: unknown tool")
 
 // Model is a chat model with the name the price table and recordings know it
 // by.
@@ -78,6 +77,9 @@ type Agent struct {
 	Context assemble.Budgets
 	// Tools the model may call; nil means none.
 	Tools Tools
+	// Output, when set, requires the final answer to be JSON matching a
+	// schema (ADR 0001 §6).
+	Output *Output
 	// LoopThreshold is how many times the same tool call, by name and
 	// arguments, may be requested before the run ends as a loop. Zero means
 	// DefaultLoopThreshold; a negative value switches detection off, which
@@ -98,6 +100,41 @@ type Agent struct {
 	// registry.Components.Secrets.Scrubber(), the one the hooks scrub with.
 	Scrubber *secret.Scrubber
 }
+
+// Output is the structured answer a run must give.
+type Output struct {
+	// Schema is what the final answer must match. Every request carries it.
+	Schema tool.Schema
+	// Retries is how many times an answer that does not match is sent back
+	// with the reason before the run ends not cleared. Zero means none;
+	// negative is invalid.
+	Retries int
+}
+
+// OutputFor returns the Output for answers of type T.
+func OutputFor[T any](retries int) (*Output, error) {
+	s, err := tool.SchemaFor[T]()
+	if err != nil {
+		return nil, err
+	}
+	return &Output{Schema: s, Retries: retries}, nil
+}
+
+// Decode reads a cleared outcome's structured answer into a T.
+func Decode[T any](o Outcome) (T, error) {
+	var v T
+	answer, ok := o.Answer()
+	if !ok {
+		return v, fmt.Errorf("agent: no answer: %s", o)
+	}
+	err := json.Unmarshal([]byte(answer), &v)
+	return v, err
+}
+
+// ErrInvalidOutput is what Report.Err matches when the final answer did not
+// match Output's schema after every retry; the error carries the last
+// *tool.ValidationError.
+var ErrInvalidOutput = errors.New("agent: the answer does not match the schema")
 
 // ErrDenied is what Report.Err matches when a hook's denial ended the run;
 // the error is a *DeniedError.
@@ -159,6 +196,9 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	}
 	if err := validHistory(a.History); err != nil {
 		return Outcome{}, Report{}, err
+	}
+	if a.Output != nil && (a.Output.Schema.IsZero() || a.Output.Retries < 0) {
+		return Outcome{}, Report{}, errors.New("agent: an output needs a schema and zero or more retries")
 	}
 	meter, err := budget.NewMeter(limits.Budget.MaxTokens, limits.Budget.MaxCostMicros, a.Prices)
 	if err != nil {
@@ -249,6 +289,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		tools = r.a.Tools.Definitions()
 	}
 
+	retries := 0
 	for step := 1; step <= maxSteps; step++ {
 		rep.Steps = step
 		if err := ctx.Err(); err != nil {
@@ -268,6 +309,9 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		}
 		r.recordDropped(dropped)
 		req.MaxOutputTokens = r.a.MaxOutputTokens
+		if r.a.Output != nil {
+			req.Schema = r.a.Output.Schema.JSON()
+		}
 		resp, reason, err := r.call(ctx, req)
 		if err != nil {
 			rep.Err = err
@@ -275,6 +319,15 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		}
 		if len(resp.ToolCalls) == 0 {
 			answer := resp.Content
+			if err := r.checkOutput(answer); err != nil {
+				if retries >= r.a.Output.Retries {
+					rep.Err = err
+					return NotCleared(ReasonInvalidOutput), rep
+				}
+				retries++
+				current = append(current, retryMessage(err))
+				continue
+			}
 			v := r.hooks.Run(ctx, hook.Event{Point: hook.Reply, Reply: answer})
 			if v.Denied != "" {
 				rep.Err = &DeniedError{Point: hook.Reply, Hook: v.Denied}
@@ -282,6 +335,10 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			}
 			if len(v.Changed) > 0 {
 				answer = v.Event.Reply
+				if err := r.checkOutput(answer); err != nil {
+					rep.Err = fmt.Errorf("%w (after hook %q)", err, v.Changed[len(v.Changed)-1])
+					return NotCleared(ReasonInvalidOutput), rep
+				}
 			}
 			return Answered(answer), rep
 		}
@@ -385,6 +442,32 @@ func (r *run) recordDropped(dropped []assemble.Dropped) {
 	}
 }
 
+// checkOutput checks answer against the run's Output schema, if it has one.
+// The error names a schema path and a rule, never a value from the answer.
+func (r *run) checkOutput(answer string) error {
+	if r.a.Output == nil {
+		return nil
+	}
+	if err := r.a.Output.Schema.Validate([]byte(answer)); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidOutput, err)
+	}
+	return nil
+}
+
+// retryMessage is bonyan's own request for another answer. It reports where
+// the answer failed and which rule it broke, and quotes nothing of it, so it
+// is trusted text.
+func retryMessage(err error) model.Message {
+	reason := "it does not match the schema"
+	var ve *tool.ValidationError
+	if errors.As(err, &ve) {
+		reason = ve.Error()
+	}
+	return model.Message{Role: model.RoleUser, Parts: []content.Text{content.Instruction(
+		"Your answer did not match the required schema (" + reason + "). Answer again with JSON that matches it.",
+	)}}
+}
+
 // classifyContext classifies every untrusted part of the history and every
 // material item where they enter the run.
 func (r *run) classifyContext(ctx context.Context) {
@@ -429,6 +512,7 @@ func toolText(id, text string) content.Text {
 // The texts the model is given in place of a tool's result.
 const (
 	resultUnknown  = "error: unknown tool"
+	resultInvalid  = "error: invalid arguments"
 	resultFailed   = "error: the tool failed"
 	resultDenied   = "error: the call was denied"
 	resultWithheld = "error: the result was withheld"
@@ -472,8 +556,15 @@ func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, bool) {
 	}
 	out, err := r.a.Tools.Call(ctx, tc)
 	switch {
-	case errors.Is(err, ErrUnknownTool):
+	case errors.Is(err, tool.ErrUnknown):
 		return resultUnknown, false
+	case errors.Is(err, tool.ErrInvalidArguments):
+		// A validation error names a schema path and a rule, never a value.
+		var ve *tool.ValidationError
+		if errors.As(err, &ve) {
+			return resultInvalid + ": " + ve.Error(), false
+		}
+		return resultInvalid, false
 	case err != nil:
 		return resultFailed, false
 	}
