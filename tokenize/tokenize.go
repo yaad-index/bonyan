@@ -76,6 +76,8 @@ func text(p content.Text) string {
 		return v.Raw()
 	case content.Section:
 		return v.Render()
+	case content.Marked:
+		return v.Text()
 	}
 	return ""
 }

@@ -21,8 +21,8 @@ package content
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
 )
 
@@ -121,32 +121,105 @@ func (Section) Trusted() bool { return false }
 
 func (Section) sealed() {}
 
-// Render returns the section with the default marking: a labelled opening and
-// closing line around it and a source line before each item. Every one of
-// those lines carries a nonce derived from the section's own text, so an item
-// can neither close its section nor pass part of itself off as another item
-// from another source, and the same section always renders the same way.
-//
-// TODO(phase 9a, the trust policy in the run): the configured policy marks a
-// section at the enforcement point; this becomes the default policy's marking.
+// Render returns the section with the default marking under a nonce over its
+// own text: a labelled opening and closing line around it and a source line
+// before each item, every one carrying the nonce. An item can therefore
+// neither close its section nor pass part of itself off as another item, and
+// the same section always renders the same way. The enforcement point marks a
+// whole request under one nonce instead, so no item can hold another
+// section's lines either.
 func (s Section) Render() string {
+	open, closing, header := DefaultMarking(s.label, Nonce(s))
+	// Compose cannot refuse these delimiters: each carries a nonce over the
+	// section's own text, which no item of it can contain.
+	text, _ := s.Compose(open, closing, header)
+	return text
+}
+
+// Nonce returns the first 12 hex of a SHA-256 over every section's label and
+// items. No item of those sections can contain a line carrying it.
+func Nonce(sections ...Section) string {
 	h := sha256.New()
-	_, _ = io.WriteString(h, s.label)
-	for _, it := range s.items {
-		_, _ = fmt.Fprintf(h, "\x00%s\x00%s\x00%s\x00%s", it.from.Kind, it.from.Origin, it.from.ID, it.s)
-	}
-	nonce := hex.EncodeToString(h.Sum(nil))[:12]
-	var b strings.Builder
-	fmt.Fprintf(&b, "<<untrusted %s %s>>\n", s.label, nonce)
-	for _, it := range s.items {
-		fmt.Fprintf(&b, "[source %s: %s", nonce, it.from.Kind)
-		if it.from.ID != "" {
-			fmt.Fprintf(&b, " %s", it.from.ID)
+	for _, s := range sections {
+		_, _ = fmt.Fprintf(h, "\x01%s", s.label)
+		for _, it := range s.items {
+			_, _ = fmt.Fprintf(h, "\x00%s\x00%s\x00%s\x00%s", it.from.Kind, it.from.Origin, it.from.ID, it.s)
 		}
-		b.WriteString("]\n")
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// DefaultMarking returns the default policy's delimiters for a section
+// labelled label under nonce.
+func DefaultMarking(label, nonce string) (open, closing string, header func(Provenance) string) {
+	return fmt.Sprintf("<<untrusted %s %s>>", label, nonce),
+		fmt.Sprintf("<<end untrusted %s %s>>", label, nonce),
+		func(p Provenance) string {
+			if p.ID == "" {
+				return fmt.Sprintf("[source %s: %s]", nonce, p.Kind)
+			}
+			return fmt.Sprintf("[source %s: %s %s]", nonce, p.Kind, p.ID)
+		}
+}
+
+// ErrUnsafeMarking reports delimiters that do not delimit: an empty one, or one
+// that an item's own text contains.
+var ErrUnsafeMarking = errors.New("content: marking does not delimit")
+
+// Compose renders the section with the given delimiters: open, then each item
+// after its header, then closing. It refuses delimiters that are empty or that
+// occur in an item's text, since such an item could end its section early or
+// pose as another item.
+func (s Section) Compose(open, closing string, header func(Provenance) string) (string, error) {
+	if open == "" || closing == "" || header == nil {
+		return "", ErrUnsafeMarking
+	}
+	var b strings.Builder
+	b.WriteString(open)
+	b.WriteString("\n")
+	for _, it := range s.items {
+		hd := header(it.from)
+		if hd == "" {
+			return "", ErrUnsafeMarking
+		}
+		b.WriteString(hd)
+		b.WriteString("\n")
 		b.WriteString(it.s)
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "<<end untrusted %s %s>>", s.label, nonce)
-	return b.String()
+	for _, it := range s.items {
+		if strings.Contains(it.s, closing) || strings.Contains(it.s, open) {
+			return "", ErrUnsafeMarking
+		}
+		for _, other := range s.items {
+			if strings.Contains(it.s, header(other.from)) {
+				return "", ErrUnsafeMarking
+			}
+		}
+	}
+	b.WriteString(closing)
+	return b.String(), nil
 }
+
+// Marked is a section as the enforcement point marked it for a model: its
+// items, and the text the model is sent. Only bonyan's enforcement point
+// builds one (ADR 0001 §3); it is untrusted as a whole.
+type Marked struct {
+	section Section
+	text    string
+}
+
+// NewMarked pairs a section with the text it was marked as. It is for the
+// enforcement point.
+func NewMarked(s Section, text string) Marked { return Marked{section: s, text: text} }
+
+// Section is the section that was marked.
+func (m Marked) Section() Section { return m.section }
+
+// Text is what the model is sent.
+func (m Marked) Text() string { return m.text }
+
+// Trusted is always false.
+func (Marked) Trusted() bool { return false }
+
+func (Marked) sealed() {}

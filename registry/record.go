@@ -26,6 +26,13 @@ const (
 	DecisionDenied  = "denied"
 )
 
+// The decisions recorded at the trust enforcement point.
+const (
+	DecisionRefused        = "refused"
+	DecisionDropped        = "dropped"
+	DecisionDefaultMarking = "default marking"
+)
+
 // SinkFile is the name the file recording sink is registered under. Its
 // options are {"dir": ..., "full": ..., "subject": ...}, as record.FileOptions.
 const SinkFile = "file"

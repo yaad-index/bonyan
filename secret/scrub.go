@@ -82,6 +82,8 @@ func (s *Scrubber) ScrubText(t content.Text) content.Text {
 			items[i] = content.From(it.Provenance(), s.Scrub(it.Raw()))
 		}
 		return content.NewSection(v.Label(), items...)
+	case content.Marked:
+		return content.NewMarked(s.ScrubText(v.Section()).(content.Section), s.Scrub(v.Text()))
 	}
 	return t
 }

@@ -54,8 +54,8 @@ func TestTheSectionsComeInOrder(t *testing.T) {
 	tools := []model.ToolDef{{Name: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
 	req, dropped, err := assemble.Build(assemble.Input{
 		Instructions: content.Instruction("be brief"),
-		Memory:       []content.Untrusted{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, "a fact")},
-		Material:     []content.Untrusted{from(content.KindFetched, "doc-1", "a page")},
+		Memory:       []content.Text{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, "a fact")},
+		Material:     []content.Text{from(content.KindFetched, "doc-1", "a page")},
 		Earlier:      []model.Message{user("m0", "earlier"), reply("an answer")},
 		Current:      []model.Message{user("m1", "now")},
 		Tools:        tools,
@@ -98,8 +98,8 @@ func only(t *testing.T, m model.Message) content.Untrusted {
 func TestUntrustedTextOnlyInsideASection(t *testing.T) {
 	req, _, err := assemble.Build(assemble.Input{
 		Instructions: content.Instruction("x"),
-		Memory:       []content.Untrusted{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, "a fact")},
-		Material:     []content.Untrusted{from(content.KindFetched, "d", "page")},
+		Memory:       []content.Text{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser}, "a fact")},
+		Material:     []content.Text{from(content.KindFetched, "d", "page")},
 		Earlier:      []model.Message{user("m0", "earlier"), calls("c0"), result("c0", "found")},
 		Current:      []model.Message{user("m1", "now")},
 	}, roomy, counter)
@@ -124,8 +124,8 @@ func TestUntrustedTextOnlyInsideASection(t *testing.T) {
 func TestInputThePipelineCannotPlaceIsRefused(t *testing.T) {
 	for name, in := range map[string]assemble.Input{
 		"system message in history": {Earlier: []model.Message{{Role: model.RoleSystem, Parts: []content.Text{from(content.KindUser, "m0", "x")}}}},
-		"trusted text in history":   {Earlier: []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.Instruction("x")}}}},
-		"trusted text in this run":  {Current: []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.Instruction("x")}}}},
+		"a marked part in history":  {Earlier: []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.NewMarked(content.NewSection("x"), "x")}}}},
+		"a marked item in material": {Material: []content.Text{content.NewMarked(content.NewSection("x"), "x")}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, _, err := assemble.Build(in, roomy, counter)
@@ -186,10 +186,11 @@ func TestWhatCannotBeTrimmedFailsTyped(t *testing.T) {
 
 func TestMemoryAndMaterialDropFromTheEnd(t *testing.T) {
 	items := []content.Untrusted{from(content.KindFetched, "d0", "first"), from(content.KindFetched, "d1", "second"), from(content.KindFetched, "d2", "third")}
+	texts := []content.Text{items[0], items[1], items[2]}
 	fitTwo := sizeOf(t, model.Message{Role: model.RoleUser, Parts: []content.Text{content.NewSection(assemble.SectionMaterial, items[:2]...)}})
 	b := roomy
 	b.Material = fitTwo
-	req, dropped, err := assemble.Build(assemble.Input{Material: items}, b, counter)
+	req, dropped, err := assemble.Build(assemble.Input{Material: texts}, b, counter)
 	require.NoError(t, err)
 	kept := req.Messages[1].Parts[0].(content.Section).Items()
 	assert.Equal(t, items[:2], kept)
@@ -199,7 +200,7 @@ func TestMemoryAndMaterialDropFromTheEnd(t *testing.T) {
 
 	b = roomy
 	b.Memory = 1
-	mem := []content.Untrusted{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser, ID: "fact-7"}, "a fact")}
+	mem := []content.Text{content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser, ID: "fact-7"}, "a fact")}
 	req, dropped, err = assemble.Build(assemble.Input{Memory: mem}, b, counter)
 	require.NoError(t, err)
 	assert.Len(t, req.Messages, 1, "no context message when every item is dropped")
@@ -281,7 +282,7 @@ func TestTrimmingNeverOrphansAToolExchange(t *testing.T) {
 func TestTrimmingIsDeterministic(t *testing.T) {
 	in := assemble.Input{
 		Instructions: content.Instruction("x"),
-		Material:     []content.Untrusted{from(content.KindFetched, "a", strings.Repeat("a", 30)), from(content.KindFetched, "b", strings.Repeat("b", 30))},
+		Material:     []content.Text{from(content.KindFetched, "a", strings.Repeat("a", 30)), from(content.KindFetched, "b", strings.Repeat("b", 30))},
 		Earlier:      []model.Message{user("m0", strings.Repeat("c", 30)), user("m1", "d")},
 		Current:      []model.Message{user("m2", "now")},
 	}
@@ -290,7 +291,7 @@ func TestTrimmingIsDeterministic(t *testing.T) {
 	// Room for the first material item and for the newer earlier message
 	// beside this run's turn: one item of each is dropped.
 	b := roomy
-	b.Material = sizeOf(t, model.Message{Role: model.RoleUser, Parts: []content.Text{content.NewSection(assemble.SectionMaterial, in.Material[0])}})
+	b.Material = sizeOf(t, model.Message{Role: model.RoleUser, Parts: []content.Text{content.NewSection(assemble.SectionMaterial, in.Material[0].(content.Untrusted))}})
 	b.History = sizeOf(t, full.Messages[3:]...)
 	req1, d1, err := assemble.Build(in, b, counter)
 	require.NoError(t, err)
@@ -301,4 +302,20 @@ func TestTrimmingIsDeterministic(t *testing.T) {
 		assert.Equal(t, req1, req2)
 		assert.Equal(t, d1, d2)
 	}
+}
+
+// Text the trust policy declared trusted where it entered is placed as it is:
+// in the conversation where it was, and after the section in the context
+// message.
+func TestTrustedTextIsPlacedOutsideTheSections(t *testing.T) {
+	trusted := content.Instruction("a vetted page")
+	req, _, err := assemble.Build(assemble.Input{
+		Material: []content.Text{from(content.KindFetched, "d", "page"), trusted},
+		Current:  []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.Instruction("a vetted question")}}},
+	}, roomy, counter)
+	require.NoError(t, err)
+	require.Len(t, req.Messages, 3)
+	assert.Equal(t, assemble.SectionMaterial, req.Messages[1].Parts[0].(content.Section).Label())
+	assert.Equal(t, trusted, req.Messages[1].Parts[1])
+	assert.Equal(t, []content.Text{content.Instruction("a vetted question")}, req.Messages[2].Parts)
 }

@@ -67,6 +67,10 @@ type Event struct {
 	Call model.ToolCall
 	// Result is the tool's result, at AfterTool.
 	Result content.Untrusted
+	// Trusted is the trust policy's decision for Message or Result: true when
+	// it declared the source trusted. A hook's change to either is untrusted
+	// whatever this says, since a change never raises trust.
+	Trusted bool
 	// Reply is the final answer, at Reply.
 	Reply string
 	// Outcome is how the run ended, at RunEnd: "cleared" or the not-cleared

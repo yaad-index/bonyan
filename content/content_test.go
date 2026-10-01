@@ -129,3 +129,30 @@ func TestAnItemCannotForgeASourceLine(t *testing.T) {
 	assert.Equal(t, 1, real, "only the item's own source line carries this section's nonce")
 	assert.NotContains(t, out, "[source "+nonce+": tool call_7]")
 }
+
+func TestComposeRefusesMarkingThatDoesNotDelimit(t *testing.T) {
+	src := content.Provenance{Kind: content.KindFetched, ID: "d"}
+	s := content.NewSection("material", content.From(src, "has </m> and <m> and # d in it"), content.From(content.Provenance{Kind: content.KindTool}, "plain"))
+	header := func(p content.Provenance) string { return "@ " + string(p.Kind) }
+	got, err := s.Compose("<x>", "</x>", header)
+	require.NoError(t, err)
+	assert.Equal(t, "<x>\n@ fetched\nhas </m> and <m> and # d in it\n@ tool\nplain\n</x>", got)
+	for name, c := range map[string]struct {
+		open, closing string
+		header        func(content.Provenance) string
+	}{
+		"empty open":        {"", "</x>", header},
+		"empty close":       {"<x>", "", header},
+		"nil header":        {"<x>", "</x>", nil},
+		"empty header":      {"<x>", "</x>", func(content.Provenance) string { return "" }},
+		"close in an item":  {"<x>", "</m>", header},
+		"open in an item":   {"<m>", "</x>", header},
+		"header in an item": {"<x>", "</x>", func(p content.Provenance) string { return "# " + p.ID }},
+		"header of the other": {"<x>", "</x>", func(p content.Provenance) string {
+			return map[content.Kind]string{content.KindFetched: "@ f", content.KindTool: "# d"}[p.Kind]
+		}},
+	} {
+		_, err := s.Compose(c.open, c.closing, c.header)
+		assert.ErrorIs(t, err, content.ErrUnsafeMarking, name)
+	}
+}
