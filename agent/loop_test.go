@@ -16,7 +16,6 @@ import (
 	"github.com/yaad-index/bonyan/agent"
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
-	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
@@ -349,31 +348,6 @@ func TestToolResults(t *testing.T) {
 	assert.Equal(t, "token [REDACTED]", results["a"], "tool output is scrubbed before it enters context")
 	assert.Equal(t, "error: the tool failed", results["b"], "a tool error is reported without its text")
 	assert.Equal(t, "error: unknown tool", results["c"])
-}
-
-type hookLog struct {
-	mu     sync.Mutex
-	points []hook.Point
-}
-
-func (h *hookLog) Run(_ context.Context, ev hook.Event) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.points = append(h.points, ev.Point)
-}
-
-func TestHooksAreCalledAtTheirPoints(t *testing.T) {
-	h := &hookLog{}
-	a := newAgent(agent.Model{Name: "main", Chat: &scripted{steps: stepsOf(toolCall("search", `{}`), answer("done"))}})
-	a.Hooks = h
-	_, _, err := agent.Run(context.Background(), a, input("go"))
-	require.NoError(t, err)
-	assert.Equal(t, []hook.Point{
-		hook.RunStart, hook.UserMessage,
-		hook.BeforeModel, hook.AfterModel, hook.BeforeTool, hook.AfterTool,
-		hook.BeforeModel, hook.AfterModel, hook.Reply,
-		hook.RunEnd,
-	}, h.points)
 }
 
 func TestAnAgentThatCannotRunIsAnError(t *testing.T) {

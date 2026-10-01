@@ -26,8 +26,6 @@ import (
 // TODO(phase: trust policy, next to context assembly): classify the input and
 // every tool result through Agent.Trust, record each decision, add the
 // enforcement point before every model request, and drop ErrTrustPolicy.
-// TODO(phase: hook points, next to the agent loop): hand each point its
-// payload and act on change and deny.
 
 // ErrTrustPolicy is what Run returns for a trust policy other than the
 // default. The loop classifies as the default policy does, and refuses another
@@ -88,17 +86,31 @@ type Agent struct {
 	Trust trust.Policy
 	// Recorder records every call; nil records nothing.
 	Recorder *record.Recorder
-	// Hooks observe the run; nil runs none.
-	Hooks HookRunner
+	// Hooks are the hooks attached to each point (registry.Components.Hooks);
+	// nil runs none. A hook may change or deny where ADR 0001 §12 allows.
+	Hooks *registry.Hooks
 	// Scrubber removes resolved secrets from tool output before it enters
-	// context (ADR 0001 §10); nil means a scrubber holding no values.
+	// context (ADR 0001 §10); nil means a scrubber holding no values. Pass
+	// registry.Components.Secrets.Scrubber(), the one the hooks scrub with.
 	Scrubber *secret.Scrubber
 }
 
-// HookRunner calls the hooks attached to a point.
-type HookRunner interface {
-	Run(ctx context.Context, ev hook.Event)
+// ErrDenied is what Report.Err matches when a hook's denial ended the run;
+// the error is a *DeniedError.
+var ErrDenied = errors.New("agent: denied by a hook")
+
+// DeniedError says which hook ended the run, and at which point.
+type DeniedError struct {
+	Point hook.Point
+	Hook  string
 }
+
+func (e *DeniedError) Error() string {
+	return fmt.Sprintf("agent: hook %q denied at %s", e.Hook, e.Point)
+}
+
+// Is reports a match for ErrDenied.
+func (e *DeniedError) Is(target error) bool { return target == ErrDenied }
 
 // Report is what a run did, beside its Outcome.
 type Report struct {
@@ -153,10 +165,6 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	if threshold == 0 {
 		threshold = DefaultLoopThreshold
 	}
-	hooks := a.Hooks
-	if hooks == nil {
-		hooks = noHooks{}
-	}
 
 	models := make([]model.Chat, len(a.Models))
 	for i, m := range a.Models {
@@ -170,11 +178,15 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	ctx, cancel := context.WithTimeout(ctx, limits.Deadline)
 	defer cancel()
 
-	r := run{a: a, models: models, scrub: scrub, hooks: hooks, threshold: threshold, seen: map[string]int{}}
-	hooks.Run(ctx, hook.Event{Point: hook.RunStart})
+	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}}
+	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
 	out, rep := r.loop(ctx, limits.MaxSteps, input)
 	rep.Tokens, rep.Cost = meter.Spent()
-	hooks.Run(ctx, hook.Event{Point: hook.RunEnd})
+	ended := "cleared"
+	if !out.Cleared() {
+		ended = string(out.Reason())
+	}
+	r.hooks.Run(ctx, hook.Event{Point: hook.RunEnd, Outcome: ended})
 	return out, rep, nil
 }
 
@@ -195,31 +207,34 @@ func defaultPolicy(p trust.Policy) error {
 	return fmt.Errorf("%w: got %T", ErrTrustPolicy, p)
 }
 
-type noHooks struct{}
-
-func (noHooks) Run(context.Context, hook.Event) {}
-
 type run struct {
 	a         Agent
 	models    []model.Chat
 	scrub     *secret.Scrubber
-	hooks     HookRunner
+	hooks     *registry.Hooks
 	threshold int
 	seen      map[string]int
 }
 
 func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (Outcome, Report) {
+	var rep Report
+	v := r.hooks.Run(ctx, hook.Event{Point: hook.UserMessage, Message: input})
+	if v.Denied != "" {
+		rep.Err = &DeniedError{Point: hook.UserMessage, Hook: v.Denied}
+		return NotCleared(ReasonDenied), rep
+	}
+	if len(v.Changed) > 0 {
+		input = v.Event.Message
+	}
 	msgs := []model.Message{
 		{Role: model.RoleSystem, Parts: []content.Text{r.a.Instructions}},
 		{Role: model.RoleUser, Parts: []content.Text{input}},
 	}
-	r.hooks.Run(ctx, hook.Event{Point: hook.UserMessage})
 	var tools []model.ToolDef
 	if r.a.Tools != nil {
 		tools = r.a.Tools.Definitions()
 	}
 
-	var rep Report
 	for step := 1; step <= maxSteps; step++ {
 		rep.Steps = step
 		if err := ctx.Err(); err != nil {
@@ -233,8 +248,16 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			return NotCleared(reason), rep
 		}
 		if len(resp.ToolCalls) == 0 {
-			r.hooks.Run(ctx, hook.Event{Point: hook.Reply})
-			return Answered(resp.Content), rep
+			answer := resp.Content
+			v := r.hooks.Run(ctx, hook.Event{Point: hook.Reply, Reply: answer})
+			if v.Denied != "" {
+				rep.Err = &DeniedError{Point: hook.Reply, Hook: v.Denied}
+				return NotCleared(ReasonDenied), rep
+			}
+			if len(v.Changed) > 0 {
+				answer = v.Event.Reply
+			}
+			return Answered(answer), rep
 		}
 
 		msgs = append(msgs, model.Message{Role: model.RoleAssistant, ToolCalls: resp.ToolCalls})
@@ -249,17 +272,27 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 	return NotCleared(ReasonStepLimit), rep
 }
 
-// call asks each model in turn until one answers. A budget crossing or the
-// deadline ends the run at once rather than moving to the next model.
+// call asks each model in turn until one answers. A budget crossing, the
+// deadline or a denial ends the run at once rather than moving to the next
+// model. A hook's change to the request applies to that call only; the run's
+// history keeps what the loop built.
 func (r *run) call(ctx context.Context, req model.ChatRequest) (model.ChatResponse, Reason, error) {
 	var errs []error
 	for _, m := range r.models {
-		r.hooks.Run(ctx, hook.Event{Point: hook.BeforeModel})
-		resp, err := m.Chat(ctx, req)
-		r.hooks.Run(ctx, hook.Event{Point: hook.AfterModel})
+		sent := req
+		v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeModel, Messages: req.Messages})
+		if v.Denied != "" {
+			return model.ChatResponse{}, ReasonDenied, &DeniedError{Point: hook.BeforeModel, Hook: v.Denied}
+		}
+		if len(v.Changed) > 0 {
+			sent.Messages = v.Event.Messages
+		}
+		resp, err := m.Chat(ctx, sent)
 		if err == nil {
+			r.hooks.Run(ctx, hook.Event{Point: hook.AfterModel, Response: resp})
 			return resp, "", nil
 		}
+		r.hooks.Run(ctx, hook.Event{Point: hook.AfterModel})
 		switch {
 		case errors.Is(err, budget.ErrExceeded), errors.Is(err, budget.ErrUnpriced), errors.Is(err, budget.ErrNoOutputCap):
 			return model.ChatResponse{}, ReasonBudgetLimit, err
@@ -299,21 +332,50 @@ func callKey(tc model.ToolCall) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// The texts the model is given in place of a tool's result.
+const (
+	resultUnknown  = "error: unknown tool"
+	resultFailed   = "error: the tool failed"
+	resultDenied   = "error: the call was denied"
+	resultWithheld = "error: the result was withheld"
+)
+
 // runTool runs one call and returns the message carrying its result. The
-// result is untrusted, scrubbed of resolved secrets, and a failure is reported
-// by kind only, since an error's text can carry content.
+// result is untrusted and scrubbed of resolved secrets, and a failure is
+// reported by kind only, since an error's text can carry content. Hooks before
+// the call may change its arguments or deny it; hooks after it may change the
+// result, and a failing one withholds it.
 func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
-	r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool})
-	defer r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool})
+	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
+	if v.Denied != "" {
+		return model.ToolResult(tc.ID, resultDenied)
+	}
+	call := tc
+	if len(v.Changed) > 0 {
+		call.Arguments = v.Event.Call.Arguments
+	}
+	text := r.callTool(ctx, call)
+	result := content.From(content.Provenance{Kind: content.KindTool, ID: tc.ID}, text)
+	v = r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool, Call: call, Result: result})
+	switch {
+	case v.Denied != "":
+		text = resultWithheld
+	case len(v.Changed) > 0:
+		text = v.Event.Result.Raw()
+	}
+	return model.ToolResult(tc.ID, text)
+}
+
+func (r *run) callTool(ctx context.Context, tc model.ToolCall) string {
 	if r.a.Tools == nil {
-		return model.ToolResult(tc.ID, "error: unknown tool")
+		return resultUnknown
 	}
 	out, err := r.a.Tools.Call(ctx, tc)
 	switch {
 	case errors.Is(err, ErrUnknownTool):
-		return model.ToolResult(tc.ID, "error: unknown tool")
+		return resultUnknown
 	case err != nil:
-		return model.ToolResult(tc.ID, "error: the tool failed")
+		return resultFailed
 	}
-	return model.ToolResult(tc.ID, r.scrub.Scrub(out))
+	return r.scrub.Scrub(out)
 }

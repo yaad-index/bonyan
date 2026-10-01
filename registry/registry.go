@@ -20,6 +20,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
@@ -58,9 +59,13 @@ var ErrUnknown = errors.New("registry: unknown implementation")
 
 // ErrNoRecorder reports configuration whose parts must be recorded, assembled
 // without a recording: a trust policy other than the default, whose decisions
-// may declare sources trusted, or hooks, whose failures are recorded instead of
-// changing the run.
+// may declare sources trusted, or hooks, whose changes, denials and failures are
+// recorded with the hook's name.
 var ErrNoRecorder = errors.New("registry: a recording is required")
+
+// ErrHookPoint is what Assemble returns for a hook that may change or deny
+// attached at a point that allows neither, which could not act as written.
+var ErrHookPoint = errors.New("registry: hook cannot act at its point")
 
 // slot holds the named factories for one kind of part.
 type slot[T any] struct {
@@ -290,14 +295,74 @@ func (c Components) Close() error {
 
 // Hooks holds the hooks configuration attached to each point, in order.
 type Hooks struct {
-	byPoint map[hook.Point][]hook.Hook
+	byPoint map[hook.Point][]guardedHook
+	scrub   *secret.Scrubber
 }
 
-// Run calls the hooks attached to ev.Point, in their configured order.
-func (h *Hooks) Run(ctx context.Context, ev hook.Event) {
-	for _, x := range h.byPoint[ev.Point] {
-		_ = x.Observe(ctx, ev)
+// Run calls the hooks attached to ev.Point in their configured order. ev is
+// scrubbed before the first hook sees it; each hook sees the payload as the one
+// before it left it, and the first denial ends the point (ADR 0001 §12). A nil
+// Hooks runs none.
+func (h *Hooks) Run(ctx context.Context, ev hook.Event) hook.Verdict {
+	if h == nil || len(h.byPoint[ev.Point]) == 0 {
+		return hook.Verdict{Event: ev}
 	}
+	v := hook.Verdict{Event: scrubEvent(ev, h.scrub)}
+	for _, g := range h.byPoint[ev.Point] {
+		next, changed, denied := g.run(ctx, v.Event)
+		if denied {
+			v.Denied = g.name
+			return v
+		}
+		if changed {
+			v.Event = next
+			v.Changed = append(v.Changed, g.name)
+		}
+	}
+	return v
+}
+
+// scrubEvent returns ev with every resolved secret removed from its content.
+func scrubEvent(ev hook.Event, s *secret.Scrubber) hook.Event {
+	ev.Message = content.From(ev.Message.Provenance(), s.Scrub(ev.Message.Raw()))
+	if ev.Messages != nil {
+		msgs := make([]model.Message, len(ev.Messages))
+		for i, m := range ev.Messages {
+			parts := make([]content.Text, len(m.Parts))
+			for j, p := range m.Parts {
+				parts[j] = s.ScrubText(p)
+			}
+			m.Parts = parts
+			m.ToolCalls = scrubCalls(m.ToolCalls, s)
+			msgs[i] = m
+		}
+		ev.Messages = msgs
+	}
+	ev.Response.Content = s.Scrub(ev.Response.Content)
+	ev.Response.ToolCalls = scrubCalls(ev.Response.ToolCalls, s)
+	ev.Call.Arguments = scrubArgs(ev.Call.Arguments, s)
+	ev.Result = content.From(ev.Result.Provenance(), s.Scrub(ev.Result.Raw()))
+	ev.Reply = s.Scrub(ev.Reply)
+	return ev
+}
+
+func scrubCalls(calls []model.ToolCall, s *secret.Scrubber) []model.ToolCall {
+	if calls == nil {
+		return nil
+	}
+	out := make([]model.ToolCall, len(calls))
+	for i, c := range calls {
+		c.Arguments = scrubArgs(c.Arguments, s)
+		out[i] = c
+	}
+	return out
+}
+
+func scrubArgs(args json.RawMessage, s *secret.Scrubber) json.RawMessage {
+	if args == nil {
+		return nil
+	}
+	return json.RawMessage(s.Scrub(string(args)))
 }
 
 // Assemble builds every configured part and wraps it. Every implementation is
@@ -363,6 +428,9 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			if err != nil {
 				return Components{}, err
 			}
+			if _, ok := h.(hook.Interceptor); ok && hook.Rights(point) == 0 {
+				return Components{}, fmt.Errorf("%w: hook %q may change or deny, and %q allows neither", ErrHookPoint, hc.Impl, point)
+			}
 			hooks[point] = append(hooks[point], attached{name: hc.Impl, h: h})
 		}
 	}
@@ -413,10 +481,10 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		out.Classifier = guardClassifier(cls)
 	}
 	out.Trust = guardPolicy(policyCfg.Impl, policy, ev)
-	out.Hooks = &Hooks{byPoint: map[hook.Point][]hook.Hook{}}
+	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber()}
 	for point, list := range hooks {
 		for _, x := range list {
-			out.Hooks.byPoint[point] = append(out.Hooks.byPoint[point], guardedHook{name: x.name, inner: x.h, rec: ev})
+			out.Hooks.byPoint[point] = append(out.Hooks.byPoint[point], guardedHook{name: x.name, inner: x.h, rec: ev, scrub: out.Hooks.scrub})
 		}
 	}
 	return out, nil
