@@ -142,6 +142,10 @@ A policy that trusts one tool server and not another. A policy sees the source k
 Short-term and long-term layers, subject and source on every record, recall re-marking by source, retention, and delete by subject. A conformance suite every backend must pass.
 *Tests:* the suite itself, run against an in-memory reference backend.
 
+### Phase 12a: memory in the run
+Recall into the context and writing to memory from the run, the memory write and recall hook points with the rights at each stated in ADR 0001 (an amendment, maintainer approval required), and deletion by subject removing a subject's full recordings.
+*Tests:* recalled memory enters the run inside the marked section unless both decisions trusted it; each memory hook point receives its payload and can do only what its rights allow; deletion by subject leaves no full recording of the subject.
+
 ### Phase 13: the basic memory backend
 The SQLite-backed implementation, passing the conformance suite. Adds the driver. Depends on phase 1's decision.
 
