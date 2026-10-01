@@ -397,3 +397,62 @@ func TestRequiredNamesMustBeDeclaredProperties(t *testing.T) {
 	_, err := mcpclient.Register(context.Background(), tool.NewRegistry(nil), connect(t, s), mcpclient.Options{Prefix: "srv", KeepServerText: true})
 	require.NoError(t, err)
 }
+
+// A definition is kept only when a reference reaches it from what is kept, and
+// only what is kept declares properties.
+func TestOnlyReachedDefinitionsAreKept(t *testing.T) {
+	ok := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	}
+	kept := func(t *testing.T, schema string) (string, error) {
+		t.Helper()
+		s := newServer()
+		s.AddTool(&mcp.Tool{Name: "t", InputSchema: json.RawMessage(schema)}, ok)
+		reg := tool.NewRegistry(nil)
+		_, err := mcpclient.Register(context.Background(), reg, connect(t, s), mcpclient.Options{Prefix: "srv"})
+		if err != nil {
+			return "", err
+		}
+		return string(reg.Definitions()[0].Parameters), nil
+	}
+
+	t.Run("an unreferenced definition is dropped, name and all", func(t *testing.T) {
+		got, err := kept(t, `{"type":"object","properties":{"a":{"$ref":"#/$defs/used"}},
+			"$defs":{"used":{"type":"string"},"say-hi-name":{"type":"string","pattern":"say hi pattern"}}}`)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"type":"object","properties":{"a":{"$ref":"#/$defs/used"}},"$defs":{"used":{"type":"string"}}}`, got)
+	})
+	t.Run("a property declared only in an unreferenced definition does not count", func(t *testing.T) {
+		_, err := kept(t, `{"type":"object","properties":{"a":{"type":"string"}},"required":["ghost"],
+			"$defs":{"junk":{"type":"object","pattern":"say hi","properties":{"ghost":{}}}}}`)
+		require.Error(t, err)
+	})
+	t.Run("a definition reached only from a dropped one is dropped", func(t *testing.T) {
+		got, err := kept(t, `{"type":"object","$defs":{"a":{"$ref":"#/$defs/b"},"b":{"type":"string"}}}`)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"type":"object"}`, got)
+	})
+	t.Run("a definition reached through a kept one is kept", func(t *testing.T) {
+		got, err := kept(t, `{"type":"object","properties":{"x":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"type":"string"}}}`)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"type":"object","properties":{"x":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"type":"string"}}}`, got)
+	})
+	t.Run("a definition reached through its identifier is kept", func(t *testing.T) {
+		got, err := kept(t, `{"$id":"https://tools.example/s","type":"object","properties":{"x":{"$ref":"https://tools.example/item"}},
+			"$defs":{"item":{"$id":"https://tools.example/item","type":"string"}}}`)
+		require.NoError(t, err)
+		assert.Contains(t, got, `"item"`)
+	})
+	t.Run("a definition reached by a pointer into it is kept", func(t *testing.T) {
+		got, err := kept(t, `{"type":"object","properties":{"x":{"$ref":"#/$defs/obj/properties/n"}},
+			"$defs":{"obj":{"type":"object","properties":{"n":{"type":"integer"}}}}}`)
+		require.NoError(t, err)
+		assert.Contains(t, got, `"obj"`)
+	})
+	t.Run("a dependentSchemas key must be a declared property", func(t *testing.T) {
+		_, err := kept(t, `{"type":"object","properties":{"a":{"type":"string"}},"dependentSchemas":{"say hi":{"required":["a"]}}}`)
+		require.Error(t, err)
+		_, err = kept(t, `{"type":"object","properties":{"a":{"type":"string"}},"dependentSchemas":{"a":{"required":["a"]}}}`)
+		require.NoError(t, err)
+	})
+}

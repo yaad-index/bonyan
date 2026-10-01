@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -21,6 +22,7 @@ const (
 	schemaOrNames                    // a schema, or an array of property names (draft-07 dependencies)
 	identifier                       // $id, $anchor and $dynamicAnchor: kept when a reference resolves through it
 	dialect                          // $schema: kept when it names a dialect validation knows
+	definitions                      // $defs and definitions: an object of schemas, each kept when a reference reaches it
 )
 
 var keywords = map[string]keyword{
@@ -29,13 +31,21 @@ var keywords = map[string]keyword{
 	// References, what they resolve through, and the definitions they point to.
 	"$ref": value, "$dynamicRef": value,
 	"$id": identifier, "$anchor": identifier, "$dynamicAnchor": identifier,
-	"$defs": schemaMap, "definitions": schemaMap,
+	// The keys of $defs and definitions are definition names: one is kept
+	// only when a reference reaches it ("the names of the definitions a
+	// reference points to").
+	"$defs": definitions, "definitions": definitions,
 	// Applicators.
 	"allOf": schemaList, "anyOf": schemaList, "oneOf": schemaList, "not": subschema,
 	"if": subschema, "then": subschema, "else": subschema,
+	// The keys of dependentSchemas and dependencies, and the names in a
+	// dependencies array, are property names, and must be properties the
+	// kept schema declares ("property names").
 	"dependentSchemas": schemaMap, "dependencies": schemaOrNames,
 	"prefixItems": schemaList, "items": schemaOrList, "additionalItems": subschema,
 	"contains": subschema, "unevaluatedItems": subschema,
+	// The keys of properties are property names; those of patternProperties
+	// are patterns ("property names", "patterns").
 	"properties": schemaMap, "patternProperties": schemaMap,
 	"additionalProperties": subschema, "unevaluatedProperties": subschema, "propertyNames": subschema,
 	// Validation.
@@ -43,6 +53,8 @@ var keywords = map[string]keyword{
 	"multipleOf": value, "maximum": value, "exclusiveMaximum": value, "minimum": value, "exclusiveMinimum": value,
 	"maxLength": value, "minLength": value, "pattern": value, "format": value,
 	"maxItems": value, "minItems": value, "uniqueItems": value, "maxContains": value, "minContains": value,
+	// The names in required, and the keys and names of dependentRequired, are
+	// property names, checked like dependentSchemas'.
 	"maxProperties": value, "minProperties": value, "required": value, "dependentRequired": value,
 }
 
@@ -67,9 +79,25 @@ func keepValidation(schema json.RawMessage) (json.RawMessage, error) {
 	if err := json.Unmarshal(schema, &v); err != nil {
 		return nil, err
 	}
-	w := &walk{properties: map[string]bool{}}
-	if _, err := w.schema(v, root, true); err != nil {
-		return nil, err
+	// Which definitions a reference reaches depends on which are kept, since
+	// a kept definition's own references count, so the first pass runs until
+	// no more are reached. It records references and declared properties only
+	// in what it keeps.
+	w := &walk{keptDefs: map[string]bool{}}
+	for {
+		w.refs, w.properties, w.defs = nil, map[string]bool{}, map[string]def{}
+		if _, err := w.schema(v, root, true); err != nil {
+			return nil, err
+		}
+		reached := false
+		for key, d := range w.defs {
+			if !w.keptDefs[key] && w.reaches(key, d) {
+				w.keptDefs[key], reached = true, true
+			}
+		}
+		if !reached {
+			break
+		}
 	}
 	w.keep = true
 	kept, err := w.schema(v, root, true)
@@ -79,14 +107,26 @@ func keepValidation(schema json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(kept)
 }
 
-// walk goes over a schema twice, along the same keywords: the first time it
-// records where each reference resolves to, the second it builds the copy.
+// walk goes over a schema along the same keywords each time: first, until it
+// settles, to record where each reference resolves to and which definitions
+// are reached; then once more to build the copy.
 type walk struct {
 	keep bool
 	refs []ref
-	// properties holds every property name the schema declares, at any
-	// level, found on the first pass.
+	// properties holds every property name the kept schema declares, at any
+	// level.
 	properties map[string]bool
+	// defs are the definitions seen on the last pass, by the pointer that
+	// reaches them; keptDefs are those a reference reaches.
+	defs     map[string]def
+	keptDefs map[string]bool
+}
+
+// def is what can reach a definition besides its pointer: its own identifier
+// and anchors, as the targets a reference would resolve to.
+type def struct {
+	id      string
+	anchors []string
 }
 
 type ref struct {
@@ -150,6 +190,16 @@ func (w *walk) schema(v any, base *url.URL, isRoot bool) (any, error) {
 		if kind == dialect {
 			if d, ok := val.(string); ok && w.keep && dialects[d] {
 				out[k] = val
+			}
+			continue
+		}
+		if kind == definitions {
+			kept, err := w.definitions(k, val, base)
+			if err != nil {
+				return nil, err
+			}
+			if w.keep && len(kept) > 0 {
+				out[k] = kept
 			}
 			continue
 		}
@@ -276,7 +326,7 @@ func (w *walk) namesProperties(k string, val any) error {
 	case "required":
 		l, _ := val.([]any)
 		names = l
-	case "dependentRequired", "dependencies":
+	case "dependentRequired", "dependencies", "dependentSchemas":
 		m, _ := val.(map[string]any)
 		for key, d := range m {
 			names = append(names, key)
@@ -294,6 +344,74 @@ func (w *walk) namesProperties(k string, val any) error {
 		}
 	}
 	return nil
+}
+
+// definitions walks the definitions under k, keeping only those a reference
+// reaches. Every definition is recorded, kept or not, so the next pass can
+// see whether a newly kept one's references reach it.
+func (w *walk) definitions(k string, val any, base *url.URL) (map[string]any, error) {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return nil, errors.New("expected an object of schemas")
+	}
+	escape := strings.NewReplacer("~", "~0", "/", "~1")
+	out := map[string]any{}
+	for name, s := range m {
+		at := *base
+		at.Fragment, at.RawFragment = "/"+k+"/"+escape.Replace(name), ""
+		key := at.String()
+		if !w.keep {
+			w.defs[key] = defOf(s, base)
+		}
+		if !w.keptDefs[key] {
+			continue
+		}
+		kept, err := w.schema(s, base, false)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = kept
+	}
+	return out, nil
+}
+
+// defOf is what can reach the definition s besides its pointer.
+func defOf(s any, base *url.URL) def {
+	m, ok := s.(map[string]any)
+	if !ok {
+		return def{}
+	}
+	var d def
+	if id, ok := m["$id"].(string); ok && id != "" {
+		if id[0] == '#' {
+			d.anchors = append(d.anchors, base.String()+id)
+		} else if u, err := base.Parse(id); err == nil {
+			base = withoutFragment(u)
+			d.id = base.String()
+		}
+	}
+	for _, k := range []string{"$anchor", "$dynamicAnchor"} {
+		if a, ok := m[k].(string); ok && a != "" {
+			d.anchors = append(d.anchors, base.String()+"#"+a)
+		}
+	}
+	return d
+}
+
+// reaches reports whether a recorded reference reaches the definition at key:
+// its pointer or anything inside it, its identifier, or one of its anchors.
+func (w *walk) reaches(key string, d def) bool {
+	for _, r := range w.refs {
+		switch {
+		case r.target == key, strings.HasPrefix(r.target, key+"/"):
+			return true
+		case d.id != "" && stripFragment(r.target) == d.id:
+			return true
+		case slices.Contains(d.anchors, r.target):
+			return true
+		}
+	}
+	return false
 }
 
 func withoutFragment(u *url.URL) *url.URL {
