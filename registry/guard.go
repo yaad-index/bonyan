@@ -167,9 +167,11 @@ func (g guardedHook) apply(ev hook.Event, act hook.Action) (hook.Event, bool) {
 // if the original already held it bare. It returns changed with its untrusted
 // parts scrubbed.
 func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]model.Message, bool) {
+	// A trusted part is matched by its text and its provenance, so a change
+	// cannot pass trusted memory off as the program's own text.
 	type placed struct {
 		role model.Role
-		text string
+		t    content.Trusted
 	}
 	trusted := map[placed]int{}
 	provs := map[content.Provenance]bool{}
@@ -178,7 +180,7 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 		for _, p := range m.Parts {
 			switch v := p.(type) {
 			case content.Trusted:
-				trusted[placed{m.Role, v.String()}]++
+				trusted[placed{m.Role, v}]++
 			case content.Untrusted:
 				provs[v.Provenance()] = true
 				bare[v.Provenance()] = true
@@ -195,7 +197,7 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 		for j, p := range m.Parts {
 			switch v := p.(type) {
 			case content.Trusted:
-				k := placed{m.Role, v.String()}
+				k := placed{m.Role, v}
 				if trusted[k] == 0 {
 					return nil, false
 				}

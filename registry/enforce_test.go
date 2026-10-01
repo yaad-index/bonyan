@@ -241,7 +241,8 @@ func TestNoHandlingWithoutUntrustedContent(t *testing.T) {
 func TestClassifyBuildsTheTypeFromTheDecision(t *testing.T) {
 	u := fetched("d", "a page")
 	assert.Equal(t, content.Text(u), registry.Classify(context.Background(), registry.GuardPolicy(nil, nil), u))
-	assert.Equal(t, content.Text(content.Instruction("a page")), registry.Classify(context.Background(), registry.GuardPolicy(trustAll{}, nil), u))
+	assert.Equal(t, content.Text(content.TrustedFrom(u.Provenance(), "a page")), registry.Classify(context.Background(), registry.GuardPolicy(trustAll{}, nil), u),
+		"trusted text keeps its provenance")
 
 	rec, ev := recorder(t)
 	got := registry.Classify(context.Background(), registry.GuardPolicy(failing{}, rec), u)

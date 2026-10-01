@@ -80,6 +80,10 @@ func TestTheStricterDecisionWins(t *testing.T) {
 			for _, got := range [][]content.Text{facts, events} {
 				require.Len(t, got, 1)
 				assert.Equal(t, tc.trusted, got[0].Trusted())
+				if tr, ok := got[0].(content.Trusted); ok {
+					assert.Equal(t, content.KindMemory, tr.Provenance().Kind, "trusted memory is still memory")
+					assert.Equal(t, content.KindUser, tr.Provenance().Origin)
+				}
 			}
 		})
 	}

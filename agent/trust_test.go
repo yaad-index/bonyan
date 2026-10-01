@@ -72,11 +72,13 @@ func TestADeclaredTrustedSourceArrivesAsTrustedText(t *testing.T) {
 
 	msgs := m.reqs[1].Messages
 	require.Len(t, msgs, 6, "system, material, history, input, the call, its result")
-	assert.Equal(t, []content.Text{content.Instruction("a page")}, msgs[1].Parts)
-	assert.Equal(t, []content.Text{content.Instruction("earlier")}, msgs[2].Parts)
-	assert.Equal(t, model.Message{Role: model.RoleUser, Parts: []content.Text{content.Instruction("go")}}, msgs[3])
+	// Each keeps where it came from.
+	assert.Equal(t, []content.Text{content.TrustedFrom(content.Provenance{Kind: content.KindFetched, ID: "doc"}, "a page")}, msgs[1].Parts)
+	assert.Equal(t, []content.Text{content.TrustedFrom(content.Provenance{Kind: content.KindUser, ID: "m0"}, "earlier")}, msgs[2].Parts)
+	assert.Equal(t, model.Message{Role: model.RoleUser, Parts: []content.Text{content.TrustedFrom(content.Provenance{Kind: content.KindUser, ID: "m1"}, "go")}}, msgs[3])
 	assert.Equal(t, model.RoleTool, msgs[5].Role)
-	assert.Equal(t, []content.Text{content.Instruction("found it")}, msgs[5].Parts)
+	require.Len(t, msgs[4].ToolCalls, 1)
+	assert.Equal(t, []content.Text{content.TrustedFrom(content.Provenance{Kind: content.KindTool, ID: msgs[4].ToolCalls[0].ID}, "found it")}, msgs[5].Parts)
 }
 
 // bonyan's own text in place of a tool result stays untrusted whatever the

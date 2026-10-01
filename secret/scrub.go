@@ -73,7 +73,7 @@ func (s *Scrubber) Scrub(in string) string {
 func (s *Scrubber) ScrubText(t content.Text) content.Text {
 	switch v := t.(type) {
 	case content.Trusted:
-		return content.Instruction(s.Scrub(v.String()))
+		return content.TrustedFrom(v.Provenance(), s.Scrub(v.String()))
 	case content.Untrusted:
 		return content.From(v.Provenance(), s.Scrub(v.Raw()))
 	case content.Section:

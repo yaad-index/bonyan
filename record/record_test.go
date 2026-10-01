@@ -515,3 +515,33 @@ func TestASectionIsRecordedItemByItem(t *testing.T) {
 	assert.Equal(t, "a page", part.Items[1].Text)
 	assert.NotContains(t, raw, "window seat")
 }
+
+// Memory the policy declared trusted is still memory: excluded by default,
+// with its provenance, and kept in a full recording.
+func TestTrustedMemoryIsAbsentByDefault(t *testing.T) {
+	mem := content.Provenance{Kind: content.KindMemory, Origin: content.KindUser, ID: "fact-9"}
+	req := model.ChatRequest{
+		Messages: []model.Message{
+			system("be brief"),
+			{Role: model.RoleUser, Parts: []content.Text{content.TrustedFrom(mem, "prefers the aisle seat")}},
+		},
+		MaxOutputTokens: 10,
+	}
+	answer := step{resp: model.ChatResponse{Content: "done", Usage: &model.Usage{}}}
+
+	f := openFile(t, record.FileOptions{})
+	_, err := record.Chat(&scripted{steps: []step{answer}}, "main", newRecorder(t, f)).Chat(context.Background(), req)
+	require.NoError(t, err)
+	_, calls, raw := readFile(t, f)
+	assert.NotContains(t, raw, "aisle seat")
+	part := calls[0].Request.Messages[1].Parts[0]
+	assert.True(t, part.Excluded)
+	assert.True(t, part.Trusted)
+	assert.Equal(t, &record.Provenance{Kind: content.KindMemory, Origin: content.KindUser, ID: "fact-9"}, part.Provenance)
+
+	full := openFile(t, record.FileOptions{Full: true, Subject: "user-17"})
+	_, err = record.Chat(&scripted{steps: []step{answer}}, "main", newRecorder(t, full)).Chat(context.Background(), req)
+	require.NoError(t, err)
+	_, _, raw = readFile(t, full)
+	assert.Contains(t, raw, "aisle seat", "a full recording keeps it")
+}
