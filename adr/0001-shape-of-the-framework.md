@@ -211,9 +211,10 @@ Two other positions were considered and rejected:
   - text the server writes into a tool's definition reaches the model in instruction position,
     outside any marked section. By default bonyan strips it at every level of the definition: the
     tool's description, and each schema's description, title, examples, default and `$comment`.
-    Property names and enum values stay, because a call needs them, and they are the server-written
-    text that still reaches the model. A program can keep the stripped text for a given server;
-    doing so is the program accepting untrusted text in instruction position.
+    The tool's name (under a prefix the program chooses), property names and enum values stay,
+    because a call needs them, and they are the server-written text that still reaches the model. A
+    program can keep the stripped text for a given server; doing so is the program accepting
+    untrusted text in instruction position.
 - Each tool declares what it may touch: secrets by name, network, filesystem. **Only secrets are
   enforced**, because bonyan is what resolves them (§10). Network and filesystem declarations are
   metadata for review and approval, not a sandbox: in-process Go code can open a socket or a file
@@ -456,5 +457,5 @@ attached in code.
   scrubbed again after it; a failing hook after a tool call withholds the result.
 - §3, §4, §5: remote tool output is a source of its own, untrusted under the default policy and kept
   as a recalled fact's source; text a tool server writes into a tool's definition is stripped by
-  default except property names and enum values, and keeping it for a server is the program
-  accepting untrusted text in instruction position.
+  default except the tool's name, property names and enum values, and keeping it for a server is
+  the program accepting untrusted text in instruction position.
