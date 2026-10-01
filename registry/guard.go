@@ -86,6 +86,32 @@ type guardedHook struct {
 	scrub *secret.Scrubber
 }
 
+// answer asks the hook at the approval point. A hook that is not an Approver
+// observes and abstains. A failing approver rejects, and every rejection is
+// recorded.
+func (g guardedHook) answer(ctx context.Context, ev hook.Event) hook.Answer {
+	ap, ok := g.inner.(hook.Approver)
+	if !ok {
+		_, failure := call(ctx, func() (struct{}, error) { return struct{}{}, g.inner.Observe(ctx, ev) })
+		if failure != "" {
+			g.event(ev.Point, "", failure)
+		}
+		return hook.Abstain
+	}
+	a, failure := call(ctx, func() (hook.Answer, error) { return ap.Answer(ctx, ev) })
+	switch {
+	case failure != "":
+		g.event(ev.Point, DecisionDenied, failure)
+		return hook.Reject
+	case a == hook.Reject:
+		g.event(ev.Point, DecisionDenied, "")
+	case a != hook.Approve && a != hook.Pending && a != hook.Abstain:
+		g.event(ev.Point, DecisionDenied, FailNotAllowed)
+		return hook.Reject
+	}
+	return a
+}
+
 // run calls the hook on ev and returns the event as the hook left it, whether
 // it changed it, and whether it denied.
 func (g guardedHook) run(ctx context.Context, ev hook.Event) (hook.Event, bool, bool) {

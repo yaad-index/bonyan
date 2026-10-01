@@ -91,6 +91,9 @@ type Handling struct {
 	Drop []int
 	// Refuse ends the run not cleared instead of sending the request.
 	Refuse bool
+	// RequireApproval makes every tool call the run makes from here on need
+	// approval (ADR 0001 §7).
+	RequireApproval bool
 }
 
 // Handler is a policy that acts on a request carrying untrusted content,

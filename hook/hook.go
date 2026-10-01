@@ -13,8 +13,8 @@ import (
 	"github.com/yaad-index/bonyan/model"
 )
 
-// TODO(phase 12a, memory; phase 14, approvals): the payloads and rights of the
-// memory and approval points. Nothing calls them before then.
+// TODO(phase 12a, memory): the payloads of the memory points. Nothing calls
+// them before then.
 
 // Point is a place in a run where hooks are called.
 type Point string
@@ -76,6 +76,46 @@ type Event struct {
 	// Outcome is how the run ended, at RunEnd: "cleared" or the not-cleared
 	// reason.
 	Outcome string
+	// Approval is the action awaiting a decision, at Approval; Call is the
+	// call as it will run.
+	Approval ApprovalRequest
+}
+
+// ApprovalRequest describes an action that needs approval.
+type ApprovalRequest struct {
+	// ID names the action, for a decision that arrives later.
+	ID string
+	// Reason is why it needs approval.
+	Reason ApprovalReason
+}
+
+// ApprovalReason is why an action needs approval.
+type ApprovalReason string
+
+// The reasons.
+const (
+	ReasonTool   ApprovalReason = "tool"   // the tool is marked as needing approval
+	ReasonPolicy ApprovalReason = "policy" // the trust policy's handling required it
+)
+
+// Answer is an approver's answer at Approval (ADR 0001 §12).
+type Answer int
+
+// The answers. The zero value abstains.
+const (
+	Abstain Answer = iota
+	Approve
+	Reject
+	Pending // the decision comes later, through the approval store
+)
+
+// Approver is a hook that answers at Approval. It approves or rejects the
+// action, abstains, or says the decision is pending; it never changes the
+// action, since what is approved is what runs. An error or a panic counts as
+// a rejection. Observe is not called on an Approver.
+type Approver interface {
+	Hook
+	Answer(ctx context.Context, ev Event) (Answer, error)
 }
 
 // Hook is called at the points configuration attaches it to. A hook that only

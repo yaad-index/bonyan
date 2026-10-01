@@ -18,7 +18,7 @@ const (
 	ReasonDeadline          Reason = "deadline"           // the deadline passed or the run was canceled
 	ReasonFallbackExhausted Reason = "fallback_exhausted" // every configured model failed
 	ReasonLoopDetected      Reason = "loop_detected"      // the loop repeated itself past its threshold
-	ReasonApproverTimeout   Reason = "approver_timeout"   // an action needing approval got no decision
+	ReasonNotApproved       Reason = "not_approved"       // an action needing approval got no decision: none was made, or it timed out
 	ReasonDenied            Reason = "denied"             // a hook denied the message, a model call or the reply
 	ReasonPlacement         Reason = "placement"          // a request held untrusted content outside a marked section
 	ReasonTrustRefused      Reason = "trust_refused"      // the trust policy's handling refused a request

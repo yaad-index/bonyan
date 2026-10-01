@@ -45,6 +45,9 @@ type Options struct {
 	// is the program accepting untrusted text in instruction position, outside
 	// any marked section (ADR 0001 §5).
 	KeepServerText bool
+	// NeedsApproval makes every call of every tool from this server wait for
+	// approval before it runs (ADR 0001 §7).
+	NeedsApproval bool
 }
 
 // validName is what a model accepts as a tool's name.
@@ -107,7 +110,7 @@ func Register(ctx context.Context, reg *tool.Registry, session *mcp.ClientSessio
 			}
 			return resultText(res)
 		}
-		if err := remote.Register(reg, p.name, p.description, p.schema, call); err != nil {
+		if err := remote.Register(reg, p.name, p.description, p.schema, opts.NeedsApproval, call); err != nil {
 			return names, err
 		}
 		names = append(names, p.name)

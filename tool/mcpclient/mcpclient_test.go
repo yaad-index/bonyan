@@ -456,3 +456,13 @@ func TestOnlyReachedDefinitionsAreKept(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// A program can make every tool of a server wait for approval.
+func TestAServersToolsCanNeedApproval(t *testing.T) {
+	s := newServer()
+	s.AddTool(&mcp.Tool{Name: "echo", InputSchema: json.RawMessage(echoSchema)}, echo(&atomic.Int32{}))
+	gated, _ := register(t, s, mcpclient.Options{Prefix: "srv", NeedsApproval: true})
+	assert.True(t, gated.NeedsApproval("srv_echo"))
+	open, _ := register(t, s, mcpclient.Options{Prefix: "srv"})
+	assert.False(t, open.NeedsApproval("srv_echo"))
+}

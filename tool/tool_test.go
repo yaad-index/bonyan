@@ -312,3 +312,13 @@ func TestATypedToolsResultsAreToolOutput(t *testing.T) {
 	assert.Equal(t, content.KindTool, r.Source("weather"))
 	assert.Equal(t, content.KindTool, r.Source("missing"))
 }
+
+func TestNeedsApprovalFollowsTheSpec(t *testing.T) {
+	r := tool.NewRegistry(nil)
+	noop := func(context.Context, lookup, *secret.Scoped) (forecast, error) { return forecast{}, nil }
+	require.NoError(t, tool.Register(r, "gated", tool.Spec{NeedsApproval: true}, noop))
+	require.NoError(t, tool.Register(r, "open", tool.Spec{}, noop))
+	assert.True(t, r.NeedsApproval("gated"))
+	assert.False(t, r.NeedsApproval("open"))
+	assert.False(t, r.NeedsApproval("missing"))
+}

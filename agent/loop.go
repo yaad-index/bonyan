@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/yaad-index/bonyan/approval"
 	"github.com/yaad-index/bonyan/assemble"
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
@@ -22,8 +25,6 @@ import (
 	"github.com/yaad-index/bonyan/trust"
 )
 
-// TODO(phase 14, approvals): add the approval hook and the approver-timeout
-// non-answer.
 // Tools is what the loop needs from the tools an agent may call.
 // *tool.Registry is bonyan's: it validates arguments against each tool's
 // schema and gives each tool only the secrets it declared (ADR 0001 §5).
@@ -38,6 +39,9 @@ type Tools interface {
 	// results under: content.KindTool, or content.KindRemoteTool for a tool on
 	// a tool server (ADR 0001 §3).
 	Source(name string) content.Kind
+	// NeedsApproval reports whether every call of the named tool waits for
+	// approval before it runs (ADR 0001 §7).
+	NeedsApproval(name string) bool
 }
 
 // Model is a chat model with the name the price table and recordings know it
@@ -109,6 +113,10 @@ type Agent struct {
 	// Telemetry emits a span per run, loop step, model call and tool call,
 	// and metrics for the model calls (ADR 0001 §9); nil emits nothing.
 	Telemetry *telemetry.Telemetry
+	// Approvals holds actions whose approval an approver said is pending,
+	// until the program decides them through it; nil holds none, so a
+	// pending answer cancels the action at once.
+	Approvals approval.Store
 }
 
 // Output is the structured answer a run must give.
@@ -243,7 +251,7 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	defer cancel()
 	ctx, endRun := a.Telemetry.Run(ctx, a.Name)
 
-	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter}
+	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter, approvalTimeout: limits.ApprovalTimeout}
 	r.policy = registry.GuardPolicy(a.Trust, a.Recorder)
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
 	out, rep := r.loop(ctx, limits.MaxSteps, input)
@@ -269,6 +277,10 @@ type run struct {
 	policy    trust.Policy
 	history   []model.Message
 	material  []content.Text
+	// approveAll is set once the policy's handling required approval: every
+	// tool call from then on needs it.
+	approveAll      bool
+	approvalTimeout time.Duration
 }
 
 // validHistory refuses history the pipeline cannot place.
@@ -370,7 +382,12 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 				rep.Err = fmt.Errorf("agent: tool call %q repeated %d times", tc.Name, r.threshold)
 				return NotCleared(ReasonLoopDetected), rep
 			}
-			current = append(current, r.runTool(ctx, tc))
+			msg, approved := r.runTool(ctx, tc)
+			if !approved {
+				rep.Err = fmt.Errorf("agent: tool call %q got no approval", tc.Name)
+				return NotCleared(ReasonNotApproved), rep
+			}
+			current = append(current, msg)
 		}
 	}
 	return NotCleared(ReasonStepLimit), rep
@@ -391,7 +408,10 @@ func (r *run) call(ctx context.Context, req model.ChatRequest) (model.ChatRespon
 		if len(v.Changed) > 0 {
 			sent.Messages = v.Event.Messages
 		}
-		sent, err := registry.Enforce(ctx, r.policy, sent)
+		sent, approveAll, err := registry.EnforceRequest(ctx, r.policy, sent)
+		if approveAll {
+			r.approveAll = true
+		}
 		switch {
 		case errors.Is(err, registry.ErrPlacement):
 			return model.ChatResponse{}, ReasonPlacement, err
@@ -544,14 +564,24 @@ const (
 // reported by kind only, since an error's text can carry content. Hooks before
 // the call may change its arguments or deny it; hooks after it may change the
 // result, and a failing one withholds it.
-func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
+func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bool) {
 	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
 	if v.Denied != "" {
-		return toolMessage(tc.ID, toolText(tc.ID, resultDenied))
+		return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), true
 	}
 	call := tc
 	if len(v.Changed) > 0 {
 		call.Arguments = v.Event.Call.Arguments
+	}
+	// Approval comes after the before-tool hooks, and nothing changes the
+	// call between it and the tool: what is approved is what runs.
+	if reason, needed := r.needsApproval(call); needed {
+		switch r.approve(ctx, call, reason) {
+		case hook.Reject:
+			return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), true
+		case hook.Abstain:
+			return model.Message{}, false
+		}
 	}
 	text, ran := r.callTool(ctx, call)
 	kind := content.KindTool
@@ -570,7 +600,66 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
 	case len(v.Changed) > 0:
 		out = v.Event.Result
 	}
-	return toolMessage(tc.ID, out)
+	return toolMessage(tc.ID, out), true
+}
+
+// needsApproval reports whether call needs approval, and why.
+func (r *run) needsApproval(call model.ToolCall) (hook.ApprovalReason, bool) {
+	switch {
+	case r.a.Tools != nil && r.a.Tools.NeedsApproval(call.Name):
+		return hook.ReasonTool, true
+	case r.approveAll:
+		return hook.ReasonPolicy, true
+	}
+	return "", false
+}
+
+// approve asks the approval point about call and returns the decision:
+// Approve, Reject, or Abstain for an action cancelled because nothing decided
+// it in time (ADR 0001 §7, §12).
+func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.ApprovalReason) hook.Answer {
+	id := approvalID()
+	v := r.hooks.Approve(ctx, hook.Event{Call: call, Approval: hook.ApprovalRequest{ID: id, Reason: reason}})
+	if v.Answer != hook.Pending {
+		return v.Answer
+	}
+	if r.a.Approvals == nil {
+		r.hooks.RecordApproval(v.By, registry.DecisionCancelled)
+		return hook.Abstain
+	}
+	decided, err := r.a.Approvals.Hold(ctx, approval.Pending{ID: id, Tool: call.Name})
+	if err != nil {
+		r.hooks.RecordApproval(v.By, registry.DecisionCancelled)
+		return hook.Abstain
+	}
+	wait := ctx
+	if r.approvalTimeout > 0 {
+		var cancel context.CancelFunc
+		wait, cancel = context.WithTimeout(ctx, r.approvalTimeout)
+		defer cancel()
+	}
+	select {
+	case ok := <-decided:
+		if ok {
+			r.hooks.RecordApproval(v.By, registry.DecisionApproved)
+			return hook.Approve
+		}
+		r.hooks.RecordApproval(v.By, registry.DecisionDenied)
+		return hook.Reject
+	case <-wait.Done():
+		// Dropped before anything else, so a decision arriving now is refused
+		// as unknown rather than applied to an action that will not run.
+		_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), id)
+		r.hooks.RecordApproval(v.By, registry.DecisionTimedOut)
+		return hook.Abstain
+	}
+}
+
+// approvalID names an action awaiting approval.
+func approvalID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // callTool runs tc and returns its scrubbed output and true, or bonyan's own
