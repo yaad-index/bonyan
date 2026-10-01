@@ -159,7 +159,11 @@ func (g guardedPolicy) handle(ctx context.Context, items []trust.Item) trust.Han
 		g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionRefused})
 	default:
 		for _, i := range got.Drop {
-			g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionDropped, Source: string(items[i].Source.Kind), Item: items[i].Source.ID})
+			ev := record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionDropped, Source: string(items[i].Source.Kind), Item: items[i].Source.ID}
+			if items[i].Source.Kind == content.KindMemory {
+				ev.Item = "" // a recording never holds a memory item's ID (ADR 0001 §4)
+			}
+			g.rec.Event(ev)
 		}
 	}
 	return got

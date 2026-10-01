@@ -264,3 +264,14 @@ type failing struct{}
 func (failing) Classify(context.Context, content.Provenance) (trust.Decision, error) {
 	return trust.Decision{Verdict: trust.Trusted}, errors.New("broken")
 }
+
+// A dropped memory item is recorded without its ID, like a trimmed one.
+func TestADroppedMemoryItemIsRecordedWithoutItsID(t *testing.T) {
+	mem := content.From(content.Provenance{Kind: content.KindMemory, Origin: content.KindUser, ID: "fact-7"}, "a fact")
+	rec, ev := recorder(t)
+	h := &policy{handle: func([]trust.Item) (trust.Handling, error) { return trust.Handling{Drop: []int{0}}, nil }}
+	_, err := registry.Enforce(context.Background(), registry.GuardPolicy(handlingPolicy{h}, rec), request(content.NewSection("memory", mem)))
+	require.NoError(t, err)
+	assert.Equal(t, []record.Event{{Slot: registry.SlotTrust, Name: "program", Decision: registry.DecisionDropped, Source: "memory"}}, ev.got)
+	assert.Equal(t, "fact-7", h.seen[0][0].Source.ID, "the handler itself still sees the source")
+}
