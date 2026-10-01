@@ -72,8 +72,8 @@ func (b Budgets) Validate() error {
 // instructions, the tool definitions, or this run's own turns.
 var ErrOverBudget = errors.New("assemble: over budget")
 
-// ErrInvalidInput reports conversation turns the pipeline cannot place: a
-// system message, or trusted text, in the history.
+// ErrInvalidInput reports input the pipeline cannot place: a system message
+// in the conversation, or an item that is neither trusted nor untrusted text.
 var ErrInvalidInput = errors.New("assemble: invalid input")
 
 // Input is what one call's context is built from.
@@ -81,11 +81,12 @@ type Input struct {
 	// Instructions are the system instructions. They are never trimmed.
 	Instructions content.Trusted
 	// Memory is recalled memory, most relevant first. Items are dropped from
-	// the end.
-	Memory []content.Untrusted
-	// Material is retrieved or fetched material, most relevant first. Items
-	// are dropped from the end.
-	Material []content.Untrusted
+	// the end. Untrusted items go inside the section; an item the trust policy
+	// declared trusted follows it as plain text.
+	Memory []content.Text
+	// Material is retrieved or fetched material, most relevant first, placed
+	// like Memory. Items are dropped from the end.
+	Material []content.Text
 	// Earlier is the conversation before this run. It is trimmed oldest
 	// first, a whole exchange at a time: an assistant message that called
 	// tools goes together with the results answering it.
@@ -104,8 +105,8 @@ type Dropped struct {
 	// Index is the item's position in its Input field.
 	Index int
 	// Source is where the item came from; for a history message, its first
-	// untrusted item's. It is zero for an assistant message, and a memory
-	// item's ID is never reported.
+	// untrusted item's. It is zero for an assistant message and for trusted
+	// text, and a memory item's ID is never reported.
 	Source content.Provenance
 	// Tokens is what the item counted.
 	Tokens int64
@@ -141,7 +142,7 @@ func Build(in Input, b Budgets, c tokenize.Counter) (model.ChatRequest, []Droppe
 	var context []content.Text
 	for _, s := range []struct {
 		name   string
-		items  []content.Untrusted
+		items  []content.Text
 		budget int64
 	}{
 		{SectionMemory, in.Memory, b.Memory},
@@ -152,9 +153,7 @@ func Build(in Input, b Budgets, c tokenize.Counter) (model.ChatRequest, []Droppe
 			return model.ChatRequest{}, nil, err
 		}
 		dropped = append(dropped, d...)
-		if len(kept) > 0 {
-			context = append(context, content.NewSection(s.name, kept...))
-		}
+		context = append(context, place(s.name, kept)...)
 	}
 
 	history, d, err := trimHistory(c, earlier, current, b.History)
@@ -172,7 +171,8 @@ func Build(in Input, b Budgets, c tokenize.Counter) (model.ChatRequest, []Droppe
 }
 
 // sectioned returns msgs with every bare untrusted part put inside a section
-// of its own, and refuses a system message or trusted text.
+// of its own, and refuses a system message. Trusted text there is what the
+// trust policy declared trusted where it entered; it stays as it is.
 func sectioned(msgs []model.Message) ([]model.Message, error) {
 	out := make([]model.Message, len(msgs))
 	for i, m := range msgs {
@@ -184,10 +184,10 @@ func sectioned(msgs []model.Message) ([]model.Message, error) {
 			switch v := p.(type) {
 			case content.Untrusted:
 				parts[j] = content.NewSection(SectionHistory, v)
-			case content.Section:
+			case content.Section, content.Trusted:
 				parts[j] = v
 			default:
-				return nil, fmt.Errorf("%w: trusted text in the conversation", ErrInvalidInput)
+				return nil, fmt.Errorf("%w: a %T part in the conversation", ErrInvalidInput, p)
 			}
 		}
 		m.Parts = parts
@@ -214,12 +214,38 @@ func fits(c tokenize.Counter, section string, budget int64, msgs []model.Message
 	return nil
 }
 
-// trimItems keeps the longest prefix of items whose section fits budget and
+// place returns items as the parts of the context message: the untrusted ones
+// in one section labelled section, then the trusted ones.
+func place(section string, items []content.Text) []content.Text {
+	var untrusted []content.Untrusted
+	var trusted []content.Text
+	for _, it := range items {
+		if u, ok := it.(content.Untrusted); ok {
+			untrusted = append(untrusted, u)
+		} else {
+			trusted = append(trusted, it)
+		}
+	}
+	var out []content.Text
+	if len(untrusted) > 0 {
+		out = append(out, content.NewSection(section, untrusted...))
+	}
+	return append(out, trusted...)
+}
+
+// trimItems keeps the longest prefix of items whose parts fit budget and
 // reports the rest as dropped.
-func trimItems(c tokenize.Counter, section string, items []content.Untrusted, budget int64) ([]content.Untrusted, []Dropped, error) {
+func trimItems(c tokenize.Counter, section string, items []content.Text, budget int64) ([]content.Text, []Dropped, error) {
+	for _, it := range items {
+		switch it.(type) {
+		case content.Untrusted, content.Trusted:
+		default:
+			return nil, nil, fmt.Errorf("%w: a %T item in %s", ErrInvalidInput, it, section)
+		}
+	}
 	n := len(items)
 	for ; n > 0; n-- {
-		used, err := count(c, []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.NewSection(section, items[:n]...)}}}, nil)
+		used, err := count(c, []model.Message{{Role: model.RoleUser, Parts: place(section, items[:n])}}, nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -229,11 +255,14 @@ func trimItems(c tokenize.Counter, section string, items []content.Untrusted, bu
 	}
 	var dropped []Dropped
 	for i := n; i < len(items); i++ {
-		t, err := count(c, []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.NewSection(section, items[i])}}}, nil)
+		t, err := count(c, []model.Message{{Role: model.RoleUser, Parts: place(section, items[i:i+1])}}, nil)
 		if err != nil {
 			return nil, nil, err
 		}
-		src := items[i].Provenance()
+		var src content.Provenance
+		if u, ok := items[i].(content.Untrusted); ok {
+			src = u.Provenance()
+		}
 		if section == SectionMemory {
 			src.ID = ""
 		}

@@ -39,10 +39,10 @@ func TestEachRequestIsAssembled(t *testing.T) {
 
 	msgs := m.reqs[0].Messages
 	require.Len(t, msgs, 4, "system, material, the recent earlier turn, this run's message")
-	assert.Equal(t, assemble.SectionMaterial, msgs[1].Parts[0].(content.Section).Label())
+	assert.Equal(t, assemble.SectionMaterial, msgs[1].Parts[0].(content.Marked).Section().Label())
 	assert.Equal(t, "recent", mustItem(t, msgs[2].Parts[0]).Raw())
 	assert.Equal(t, "now", mustItem(t, msgs[3].Parts[0]).Raw())
-	assert.Equal(t, "user message", msgs[3].Parts[0].(content.Section).Label())
+	assert.Equal(t, "user message", msgs[3].Parts[0].(content.Marked).Section().Label())
 	var drops []record.Event
 	for _, e := range sink.events {
 		if e.Slot == "assemble" {

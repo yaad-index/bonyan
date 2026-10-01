@@ -20,6 +20,8 @@ const (
 	ReasonLoopDetected      Reason = "loop_detected"      // the loop repeated itself past its threshold
 	ReasonApproverTimeout   Reason = "approver_timeout"   // an action needing approval got no decision
 	ReasonDenied            Reason = "denied"             // a hook denied the message, a model call or the reply
+	ReasonPlacement         Reason = "placement"          // a request held untrusted content outside a marked section
+	ReasonTrustRefused      Reason = "trust_refused"      // the trust policy's handling refused a request
 )
 
 // Outcome is what a run returns: either an answer, or not cleared with a

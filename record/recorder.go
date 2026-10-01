@@ -213,6 +213,8 @@ func (r redactor) part(p content.Text) Part {
 			return Part{Provenance: &prov, Excluded: true}
 		}
 		return Part{Text: r.text(v.Raw()), Provenance: &prov}
+	case content.Marked:
+		return r.part(v.Section())
 	case content.Section:
 		out := Part{Section: v.Label()}
 		for _, it := range v.Items() {

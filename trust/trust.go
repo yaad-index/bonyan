@@ -13,9 +13,6 @@ import (
 	"github.com/yaad-index/bonyan/content"
 )
 
-// TODO(phase: trust policy, next to context assembly): add marking and handling
-// to Policy. Classification is the only part defined so far.
-
 // Verdict is a policy's classification of one source.
 type Verdict int
 
@@ -60,4 +57,45 @@ type Default struct{}
 // Classify reports every source untrusted.
 func (Default) Classify(context.Context, content.Provenance) (Decision, error) {
 	return Decision{Verdict: Untrusted}, nil
+}
+
+// Marking is how a policy delimits a section of untrusted content: the lines
+// before and after it, and the line before each item. bonyan composes the
+// section from them and refuses delimiters that are empty or that an item
+// contains, using the default marking instead (ADR 0001 §3).
+type Marking struct {
+	Open, Close string
+	Header      func(content.Provenance) string
+}
+
+// Marker is a policy that chooses its marking. A policy that does not
+// implement it, or whose Mark fails, gets the default marking.
+type Marker interface {
+	Mark(ctx context.Context, label string) (Marking, error)
+}
+
+// Item describes one untrusted item of a request to a Handler: where it came
+// from and its size, never its text.
+type Item struct {
+	// Section is the label of the section holding it.
+	Section string
+	// Index is its position among the request's untrusted items.
+	Index  int
+	Source content.Provenance
+	Bytes  int
+}
+
+// Handling is what a Handler decides for a request.
+type Handling struct {
+	// Drop lists the Index of each item to leave out of the request.
+	Drop []int
+	// Refuse ends the run not cleared instead of sending the request.
+	Refuse bool
+}
+
+// Handler is a policy that acts on a request carrying untrusted content,
+// beyond marking it. It is called at the enforcement point, after every hook.
+// A Handler that fails refuses the request.
+type Handler interface {
+	Handle(ctx context.Context, items []Item) (Handling, error)
 }

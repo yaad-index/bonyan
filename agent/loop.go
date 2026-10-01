@@ -24,15 +24,6 @@ import (
 // registry, and add the invalid-output non-answer.
 // TODO(phase 14, approvals): add the approval hook and the approver-timeout
 // non-answer.
-// TODO(phase: trust policy, next to context assembly): classify the input and
-// every tool result through Agent.Trust, record each decision, add the
-// enforcement point before every model request, and drop ErrTrustPolicy.
-
-// ErrTrustPolicy is what Run returns for a trust policy other than the
-// default. The loop classifies as the default policy does, and refuses another
-// policy rather than ignore it until the trust-policy phase applies it.
-var ErrTrustPolicy = errors.New("agent: only the default trust policy is supported until the trust-policy phase")
-
 // Tools is what the loop needs from the tools an agent may call.
 type Tools interface {
 	// Definitions describes the tools to the model.
@@ -92,8 +83,10 @@ type Agent struct {
 	// DefaultLoopThreshold; a negative value switches detection off, which
 	// leaves the step limit in force.
 	LoopThreshold int
-	// Trust is the trust policy; nil means the default. Run refuses any other
-	// (ErrTrustPolicy).
+	// Trust is the trust policy (registry.Components.Trust); nil means the
+	// default. It classifies the input, each tool result, the history and the
+	// material where they enter the run, and marks and handles every request
+	// at the enforcement point (ADR 0001 §3).
 	Trust trust.Policy
 	// Recorder records every call; nil records nothing.
 	Recorder *record.Recorder
@@ -157,9 +150,6 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 			return Outcome{}, Report{}, err
 		}
 	}
-	if err := defaultPolicy(a.Trust); err != nil {
-		return Outcome{}, Report{}, err
-	}
 	budgets := a.Context
 	if budgets == (assemble.Budgets{}) {
 		budgets = assemble.DefaultBudgets()
@@ -200,6 +190,7 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	defer cancel()
 
 	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter}
+	r.policy = registry.GuardPolicy(a.Trust, a.Recorder)
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
 	out, rep := r.loop(ctx, limits.MaxSteps, input)
 	rep.Tokens, rep.Cost = meter.Spent()
@@ -211,23 +202,6 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	return out, rep, nil
 }
 
-// defaultPolicy accepts no policy, the default one, or the registry's wrapper
-// around the default one. The decision rests on the value, never on a name a
-// policy reports.
-func defaultPolicy(p trust.Policy) error {
-	switch p.(type) {
-	case nil, trust.Default, *trust.Default:
-		return nil
-	}
-	if registry.IsDefaultPolicy(p) {
-		return nil
-	}
-	if n, ok := p.(interface{ Name() string }); ok {
-		return fmt.Errorf("%w: got %q (%T)", ErrTrustPolicy, n.Name(), p)
-	}
-	return fmt.Errorf("%w: got %T", ErrTrustPolicy, p)
-}
-
 type run struct {
 	a         Agent
 	models    []model.Chat
@@ -237,6 +211,9 @@ type run struct {
 	seen      map[string]int
 	budgets   assemble.Budgets
 	counter   tokenize.Counter
+	policy    trust.Policy
+	history   []model.Message
+	material  []content.Text
 }
 
 // validHistory refuses history the pipeline cannot place.
@@ -256,15 +233,17 @@ func validHistory(msgs []model.Message) error {
 
 func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (Outcome, Report) {
 	var rep Report
-	v := r.hooks.Run(ctx, hook.Event{Point: hook.UserMessage, Message: input})
+	r.classifyContext(ctx)
+	message := registry.Classify(ctx, r.policy, input)
+	v := r.hooks.Run(ctx, hook.Event{Point: hook.UserMessage, Message: input, Trusted: message.Trusted()})
 	if v.Denied != "" {
 		rep.Err = &DeniedError{Point: hook.UserMessage, Hook: v.Denied}
 		return NotCleared(ReasonDenied), rep
 	}
 	if len(v.Changed) > 0 {
-		input = v.Event.Message
+		message = v.Event.Message
 	}
-	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.NewSection(labelUser, input)}}}
+	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{inSection(labelUser, message)}}}
 	var tools []model.ToolDef
 	if r.a.Tools != nil {
 		tools = r.a.Tools.Definitions()
@@ -278,8 +257,8 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		}
 		req, dropped, err := assemble.Build(assemble.Input{
 			Instructions: r.a.Instructions,
-			Material:     r.a.Material,
-			Earlier:      r.a.History,
+			Material:     r.material,
+			Earlier:      r.history,
 			Current:      current,
 			Tools:        tools,
 		}, r.budgets, r.counter)
@@ -333,6 +312,13 @@ func (r *run) call(ctx context.Context, req model.ChatRequest) (model.ChatRespon
 		}
 		if len(v.Changed) > 0 {
 			sent.Messages = v.Event.Messages
+		}
+		sent, err := registry.Enforce(ctx, r.policy, sent)
+		switch {
+		case errors.Is(err, registry.ErrPlacement):
+			return model.ChatResponse{}, ReasonPlacement, err
+		case err != nil:
+			return model.ChatResponse{}, ReasonTrustRefused, err
 		}
 		resp, err := m.Chat(ctx, sent)
 		if err == nil {
@@ -399,10 +385,45 @@ func (r *run) recordDropped(dropped []assemble.Dropped) {
 	}
 }
 
-// toolMessage is the message answering call id with text, as a section.
-func toolMessage(id, text string) model.Message {
-	result := content.From(content.Provenance{Kind: content.KindTool, ID: id}, text)
-	return model.Message{Role: model.RoleTool, ToolCallID: id, Parts: []content.Text{content.NewSection(labelResult, result)}}
+// classifyContext classifies every untrusted part of the history and every
+// material item where they enter the run.
+func (r *run) classifyContext(ctx context.Context) {
+	r.history = make([]model.Message, len(r.a.History))
+	for i, m := range r.a.History {
+		parts := make([]content.Text, len(m.Parts))
+		for j, p := range m.Parts {
+			parts[j] = p
+			if u, ok := p.(content.Untrusted); ok {
+				parts[j] = registry.Classify(ctx, r.policy, u)
+			}
+		}
+		m.Parts = parts
+		r.history[i] = m
+	}
+	r.material = make([]content.Text, len(r.a.Material))
+	for i, u := range r.a.Material {
+		r.material[i] = registry.Classify(ctx, r.policy, u)
+	}
+}
+
+// inSection returns t as a message part: untrusted text inside a section
+// labelled label, trusted text as it is.
+func inSection(label string, t content.Text) content.Text {
+	if u, ok := t.(content.Untrusted); ok {
+		return content.NewSection(label, u)
+	}
+	return t
+}
+
+// toolMessage is the message answering call id with t.
+func toolMessage(id string, t content.Text) model.Message {
+	return model.Message{Role: model.RoleTool, ToolCallID: id, Parts: []content.Text{inSection(labelResult, t)}}
+}
+
+// toolText is bonyan's own text in place of a tool's result: untrusted, from
+// the call, like the result it stands in for.
+func toolText(id, text string) content.Text {
+	return content.From(content.Provenance{Kind: content.KindTool, ID: id}, text)
 }
 
 // The texts the model is given in place of a tool's result.
@@ -421,34 +442,40 @@ const (
 func (r *run) runTool(ctx context.Context, tc model.ToolCall) model.Message {
 	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
 	if v.Denied != "" {
-		return toolMessage(tc.ID, resultDenied)
+		return toolMessage(tc.ID, toolText(tc.ID, resultDenied))
 	}
 	call := tc
 	if len(v.Changed) > 0 {
 		call.Arguments = v.Event.Call.Arguments
 	}
-	text := r.callTool(ctx, call)
+	text, ran := r.callTool(ctx, call)
 	result := content.From(content.Provenance{Kind: content.KindTool, ID: tc.ID}, text)
-	v = r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool, Call: call, Result: result})
+	var out content.Text = result
+	if ran {
+		out = registry.Classify(ctx, r.policy, result)
+	}
+	v = r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool, Call: call, Result: result, Trusted: out.Trusted()})
 	switch {
 	case v.Denied != "":
-		text = resultWithheld
+		out = toolText(tc.ID, resultWithheld)
 	case len(v.Changed) > 0:
-		text = v.Event.Result.Raw()
+		out = v.Event.Result
 	}
-	return toolMessage(tc.ID, text)
+	return toolMessage(tc.ID, out)
 }
 
-func (r *run) callTool(ctx context.Context, tc model.ToolCall) string {
+// callTool runs tc and returns its scrubbed output and true, or bonyan's own
+// text for a call that produced none and false.
+func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, bool) {
 	if r.a.Tools == nil {
-		return resultUnknown
+		return resultUnknown, false
 	}
 	out, err := r.a.Tools.Call(ctx, tc)
 	switch {
 	case errors.Is(err, ErrUnknownTool):
-		return resultUnknown
+		return resultUnknown, false
 	case err != nil:
-		return resultFailed
+		return resultFailed, false
 	}
-	return r.scrub.Scrub(out)
+	return r.scrub.Scrub(out), true
 }

@@ -103,8 +103,11 @@ func newAgent(models ...agent.Model) agent.Agent {
 	}
 }
 
-// item returns the one untrusted item of a section part.
+// item returns the one untrusted item of a section part, marked or not.
 func item(p content.Text) (content.Untrusted, bool) {
+	if m, ok := p.(content.Marked); ok {
+		p = m.Section()
+	}
 	s, ok := p.(content.Section)
 	if !ok || len(s.Items()) != 1 {
 		return content.Untrusted{}, false
@@ -144,7 +147,7 @@ func TestAnswerAfterAToolRoundTrip(t *testing.T) {
 	require.True(t, ok, "tool output is untrusted")
 	assert.Equal(t, "found it", res.Raw())
 	assert.Equal(t, content.Provenance{Kind: content.KindTool, ID: second[2].ToolCalls[0].ID}, res.Provenance())
-	assert.Equal(t, "tool result", second[3].Parts[0].(content.Section).Label())
+	assert.Equal(t, "tool result", second[3].Parts[0].(content.Marked).Section().Label())
 }
 
 // Every non-answer this phase can produce is a not-cleared outcome with its

@@ -210,9 +210,11 @@ type wireRequest struct {
 	MaxTokens      int                 `json:"max_tokens,omitempty"`
 }
 
-// TODO(phase: trust policy, next to context assembly): the enforcement point
-// marks untrusted parts before a request reaches an adapter; until then their
-// characters are sent as they are.
+// wireRequest builds the request body. A request from the agent loop has passed
+// the trust enforcement point, so its untrusted content arrives as marked
+// sections and is sent as marked. A section that did not pass it is sent with
+// the default marking; a bare untrusted part, which only a program calling the
+// adapter directly can send, is sent as it is.
 func (c *Client) wireRequest(req model.ChatRequest) wireRequest {
 	out := wireRequest{Model: c.opts.Model, MaxTokens: req.MaxOutputTokens}
 	for _, m := range req.Messages {
@@ -249,6 +251,8 @@ func joinParts(parts []content.Text) string {
 			texts = append(texts, v.Raw())
 		case content.Section:
 			texts = append(texts, v.Render())
+		case content.Marked:
+			texts = append(texts, v.Text())
 		}
 	}
 	return strings.Join(texts, "\n\n")
