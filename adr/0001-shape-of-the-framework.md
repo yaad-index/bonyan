@@ -209,11 +209,13 @@ Two other positions were considered and rejected:
   - their results are remote tool output (§3), not tool output. An error result is the server's
     output like any other and enters the same way;
   - text the server writes into a tool's definition reaches the model in instruction position,
-    outside any marked section. By default bonyan strips it at every level of the definition: the
-    tool's description, and each schema's description, title, examples, default and `$comment`.
-    The tool's name (under a prefix the program chooses), property names and enum values stay,
-    because a call needs them, and they are the server-written text that still reaches the model. A
-    program can keep the stripped text for a given server; doing so is the program accepting
+    outside any marked section. By default bonyan keeps only what a call needs to be valid, at every
+    level of the definition, and drops the rest: the tool's description, and in each schema every
+    keyword validation does not use, among them description, title, examples, default, `$comment`
+    and any keyword the server invents. What stays is the tool's name (under a prefix the program
+    chooses), property names, enum and const values, patterns, formats and the names of the
+    definitions a reference points to; that is the server-written text that still reaches the
+    model. A program can keep everything for a given server; doing so is the program accepting
     untrusted text in instruction position.
 - Each tool declares what it may touch: secrets by name, network, filesystem. **Only secrets are
   enforced**, because bonyan is what resolves them (§10). Network and filesystem declarations are
@@ -456,6 +458,7 @@ attached in code.
   one point see each other's changes and the first denial ends the point; what a hook changes is
   scrubbed again after it; a failing hook after a tool call withholds the result.
 - §3, §4, §5: remote tool output is a source of its own, untrusted under the default policy and kept
-  as a recalled fact's source; text a tool server writes into a tool's definition is stripped by
-  default except the tool's name, property names and enum values, and keeping it for a server is
+  as a recalled fact's source; of the text a tool server writes into a tool's definition, only
+  what a call needs to be valid is kept by default (the tool's name, property names, enum and const
+  values, patterns, formats and referenced definition names), and keeping the rest for a server is
   the program accepting untrusted text in instruction position.
