@@ -301,3 +301,36 @@ func TestTheApproverSeesNoSecret(t *testing.T) {
 	require.Len(t, ap.seen, 1)
 	assert.NotContains(t, string(ap.seen[0].Call.Arguments), "s3cr3t-approval-value")
 }
+
+// An approval does not let an action through while another approver's answer
+// is pending: the action waits for that decision, and runs only if it is not
+// a rejection.
+func TestAnApprovalWaitsForAPendingAnswer(t *testing.T) {
+	for _, approve := range []bool{false, true} {
+		t.Run(map[bool]string{true: "then approved", false: "then rejected"}[approve], func(t *testing.T) {
+			sink := &eventSink{}
+			store := approval.NewMemory()
+			a, _, tl := gated(t, sink, answers(hook.Approve), answers(hook.Pending))
+			a.Approvals = store
+			go func() {
+				for {
+					held, _ := store.List(context.Background())
+					if len(held) == 1 {
+						assert.NoError(t, store.Decide(context.Background(), held[0].ID, approve))
+						return
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			}()
+			_, _, err := agent.Run(context.Background(), a, input("go"))
+			require.NoError(t, err)
+			if approve {
+				assert.Len(t, tl.calls, 1)
+				assert.Equal(t, []string{"b:approved"}, approvals(sink))
+			} else {
+				assert.Empty(t, tl.calls, "the earlier approval did not let it through")
+				assert.Equal(t, []string{"b:denied"}, approvals(sink))
+			}
+		})
+	}
+}

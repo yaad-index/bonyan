@@ -373,12 +373,15 @@ type ApprovalVerdict struct {
 }
 
 // Approve runs the hooks at the approval point (ADR 0001 §12). Each approver
-// answers in order, and the first rejection, or failure, ends the point. The
-// action is approved when an approver approved it and none rejected it,
-// pending when none approved or rejected and one said pending, and otherwise
-// undecided, answered Abstain, which cancels it. An observing hook only
-// observes. Every outcome but a pending one is recorded here; a pending
-// action's outcome is recorded with RecordApproval when it is decided.
+// answers in order, and the first rejection, or failure, ends the point. When
+// none rejected and one said pending, the action is pending, whatever the
+// others answered: a pending approver may still reject, so an approval alone
+// does not let the action through, and the decision made later through the
+// approval store answers for every approver that said pending. Otherwise the
+// action is approved when an approver approved it, and undecided, answered
+// Abstain, which cancels it. An observing hook only observes. Every outcome
+// but a pending one is recorded here; a pending action's outcome is recorded
+// with RecordApproval when it is decided.
 func (h *Hooks) Approve(ctx context.Context, ev hook.Event) ApprovalVerdict {
 	ev.Point = hook.Approval
 	var approved, pending string
@@ -400,11 +403,11 @@ func (h *Hooks) Approve(ctx context.Context, ev hook.Event) ApprovalVerdict {
 		}
 	}
 	switch {
+	case pending != "":
+		return ApprovalVerdict{Answer: hook.Pending, By: pending}
 	case approved != "":
 		h.RecordApproval(approved, DecisionApproved)
 		return ApprovalVerdict{Answer: hook.Approve, By: approved}
-	case pending != "":
-		return ApprovalVerdict{Answer: hook.Pending, By: pending}
 	}
 	h.RecordApproval("", DecisionCancelled)
 	return ApprovalVerdict{Answer: hook.Abstain}
