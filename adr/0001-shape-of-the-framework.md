@@ -383,8 +383,13 @@ attached in code.
     denied;
   - after a tool call: change the result (sanitise or trim it) before it enters context;
   - reply out: change the reply (redact it), or deny, which ends the run with a typed error;
-  - approval, memory write and memory recall: what a hook may do there is stated with the approval
-    flow (§7) and memory (§4), and hooks are not called at these points before those are built.
+  - memory write: change the text about to be stored (redact or trim it), or deny, which leaves it
+    unstored; the run goes on. The record's source, and the decision it is stored under, are the
+    memory store's own (§4), whatever a hook changed;
+  - memory recall: change what was recalled (redact an item, or leave one out) before it enters
+    context, or deny, which leaves that recall empty; the run goes on;
+  - approval: what a hook may do there is stated with the approval flow (§7), and hooks are not
+    called at this point before it is built.
 
   A run ended by a denial is, for a gate-type agent, one more not-cleared case (§7).
 - **Several hooks at one point** run in their configured order. Each sees the payload as the hook
@@ -464,3 +469,6 @@ attached in code.
   values, patterns, formats, referenced definition names, and the identifiers and anchors a
   reference resolves through), and keeping the rest for a server is the program accepting untrusted
   text in instruction position.
+- §12: at memory write a hook may change or deny the text about to be stored, and at memory recall
+  what was recalled; a denial there leaves the record unstored or the recall empty and the run goes
+  on, and the store's source and decision for a record do not change with what a hook changed.
