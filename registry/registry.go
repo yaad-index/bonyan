@@ -722,7 +722,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			})
 		}
 		if out.EvalQueue != nil {
-			store.OnDeleteSubject("evaluation queue", out.EvalQueue.DeleteSubject)
+			store.OnDeleteSubject("evaluation queue", out.Recorder.DeleteSubject)
 		}
 	}
 	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber(), rec: ev}

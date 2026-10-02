@@ -378,8 +378,11 @@ func TestLiveEvaluationIsAssembled(t *testing.T) {
 	queueRun(c, "a", "ana")
 	queueRun(c, "b", "ben")
 	queueRun(c, "c", "ana")
+	open := record.WithSubject(record.WithRun(context.Background(), "open"), "ana")
+	c.Recorder.Start(open, record.Start{})
 
 	require.NoError(t, c.Memory.DeleteSubject(context.Background(), "ana"))
+	c.Recorder.End(open, record.End{Outcome: record.OutcomeCleared})
 	ctx := context.Background()
 	it, ok, err := c.EvalQueue.Take(ctx)
 	require.NoError(t, err)
@@ -387,7 +390,7 @@ func TestLiveEvaluationIsAssembled(t *testing.T) {
 	assert.Equal(t, "b", it.Run)
 	_, ok, err = c.EvalQueue.Take(ctx)
 	require.NoError(t, err)
-	assert.False(t, ok, "ana's runs were deleted with ana")
+	assert.False(t, ok, "ana's runs were deleted with ana, the one still open included")
 
 	c, err = newRegistry(t).Assemble(registry.Config{Chat: registry.SlotConfig{Impl: "basic"}})
 	require.NoError(t, err)

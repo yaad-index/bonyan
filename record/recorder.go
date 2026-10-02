@@ -90,6 +90,21 @@ func (r *Recorder) End(ctx context.Context, end End) {
 	}
 }
 
+// DeleteSubject deletes subject from live evaluation: the subject's runs the
+// recorder is still keeping for the queue are forgotten, so none is queued
+// when it ends, and then the subject's queued items are deleted. With no queue
+// it does nothing. It does not touch the sink; record.DeleteSubject deletes
+// full recordings.
+func (r *Recorder) DeleteSubject(ctx context.Context, subject string) error {
+	if r.queue == nil {
+		return nil
+	}
+	// Runs first: a run ending between the two steps is either already
+	// queued, and deleted next, or no longer kept.
+	r.queue.deleteSubject(subject)
+	return r.queue.q.DeleteSubject(ctx, subject)
+}
+
 // dropped records that the run in ctx was to be queued and was not.
 func (r *Recorder) dropped(ctx context.Context, failure string) {
 	if failure != "" {

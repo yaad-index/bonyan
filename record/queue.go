@@ -63,7 +63,7 @@ const (
 	DecisionDropped = "dropped"
 	QueueTooLarge   = "too_large"  // the run's recording passed MaxRunBytes
 	QueueNoSubject  = "no_subject" // the run named no subject, so it could not be deleted by subject
-	QueueFailed     = "failed"     // the queue refused it
+	QueueFailed     = "failed"     // an entry could not be kept, or the queue refused the run
 )
 
 // Option configures a Recorder.
@@ -131,13 +131,13 @@ type handoff struct {
 	runs map[string]*buffered
 }
 
-// buffered is one run's recording so far. A nil lines with tooLarge set is a
-// run past the cap, kept only so its end is recorded as dropped.
+// buffered is one run's recording so far. A run with drop set keeps no lines:
+// it will not be queued, and is kept only so its end records why.
 type buffered struct {
-	subject  string
-	size     int
-	lines    [][]byte
-	tooLarge bool
+	subject string
+	size    int
+	lines   [][]byte
+	drop    string
 }
 
 // start decides whether the run starting in ctx is handed off, and returns
@@ -161,15 +161,17 @@ func (h *handoff) add(e Entry) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	b, ok := h.runs[e.Run]
-	if !ok || b.tooLarge {
+	if !ok || b.drop != "" {
 		return
 	}
+	// A run missing an entry is dropped whole, never queued in part.
 	line, err := json.Marshal(e)
-	if err != nil {
+	switch {
+	case err != nil:
+		b.lines, b.size, b.drop = nil, 0, QueueFailed
 		return
-	}
-	if b.size+len(line)+1 > h.opts.MaxRunBytes {
-		b.lines, b.size, b.tooLarge = nil, 0, true
+	case b.size+len(line)+1 > h.opts.MaxRunBytes:
+		b.lines, b.size, b.drop = nil, 0, QueueTooLarge
 		return
 	}
 	b.lines = append(b.lines, line)
@@ -186,8 +188,8 @@ func (h *handoff) end(ctx context.Context, id string) string {
 	if !ok {
 		return ""
 	}
-	if b.tooLarge {
-		return QueueTooLarge
+	if b.drop != "" {
+		return b.drop
 	}
 	now := time.Now().UTC()
 	var buf bytes.Buffer
@@ -204,6 +206,18 @@ func (h *handoff) end(ctx context.Context, id string) string {
 		return QueueFailed
 	}
 	return ""
+}
+
+// deleteSubject forgets the runs of subject still being kept, so none of them
+// is queued when it ends.
+func (h *handoff) deleteSubject(subject string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, b := range h.runs {
+		if b.subject == subject {
+			delete(h.runs, id)
+		}
+	}
 }
 
 // MemQueue is a Queue in memory. It keeps items for its retention.

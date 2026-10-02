@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -309,4 +310,55 @@ func TestAQueuedRecordingIsScrubbed(t *testing.T) {
 		assert.Contains(t, string(items[0].Recording), "the token is", "full %v", full)
 		assert.NotContains(t, string(items[0].Recording), "queue-secret-31", "full %v", full)
 	}
+}
+
+// Deleting a subject forgets its runs still open, so none is queued when it
+// ends, and deletes its queued items; another subject's runs, and the
+// subject's runs started after the deletion, are queued as usual.
+func TestDeletingASubjectReachesRunsStillOpen(t *testing.T) {
+	q := newQueue(t)
+	rec := queued(t, &memSink{}, q, record.QueueOptions{Rate: 1})
+	run(t, rec, inRun("done", "ana"), requests[0])
+	open, other := inRun("open", "ana"), inRun("other", "ben")
+	rec.Start(open, record.Start{})
+	rec.Start(other, record.Start{})
+	chat := record.Chat(&scripted{steps: steps}, "main", rec)
+	_, err := chat.Chat(open, requests[0])
+	require.NoError(t, err)
+
+	require.NoError(t, rec.DeleteSubject(context.Background(), "ana"))
+	_, err = chat.Chat(open, requests[1])
+	require.NoError(t, err)
+	rec.End(open, record.End{Outcome: record.OutcomeCleared})
+	rec.End(other, record.End{Outcome: record.OutcomeCleared})
+	run(t, rec, inRun("later", "ana"), requests[0])
+
+	var ids []string
+	for _, it := range takeAll(t, q) {
+		ids = append(ids, it.Run)
+	}
+	assert.Equal(t, []string{"other", "later"}, ids)
+
+	plain, err := record.NewRecorder(&memSink{}, secret.NewScrubber())
+	require.NoError(t, err)
+	require.NoError(t, plain.DeleteSubject(context.Background(), "ana"), "no queue, nothing to delete")
+}
+
+// A run with an entry that cannot be kept is dropped whole and recorded as
+// dropped, never queued without the entry.
+func TestARunWithAnEntryThatCannotBeKeptIsDropped(t *testing.T) {
+	q := newQueue(t)
+	sink := &memSink{}
+	rec := queued(t, sink, q, record.QueueOptions{Rate: 1})
+	ctx := inRun("r", "ana")
+	rec.Start(ctx, record.Start{})
+	// A label's confidence that JSON cannot hold.
+	gate := record.Classifier(scriptedClassifier{resp: model.ClassifyResponse{Labels: []model.Label{{Name: "x", Confidence: math.NaN()}}}}, "gate", rec)
+	_, err := gate.Classify(ctx, content.From(content.Provenance{Kind: content.KindTool}, "x"))
+	require.NoError(t, err)
+	_, err = record.Chat(&scripted{steps: steps}, "main", rec).Chat(ctx, requests[1])
+	require.NoError(t, err)
+	rec.End(ctx, record.End{Outcome: record.OutcomeCleared})
+	assert.Zero(t, q.Len())
+	assert.Equal(t, []record.Event{{Slot: record.SlotQueue, Decision: record.DecisionDropped, Failure: record.QueueFailed}}, sink.events())
 }
