@@ -11,6 +11,7 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/tool"
@@ -57,6 +58,9 @@ type Variant struct {
 	Model string
 	// Context, when set, replaces the agent's context budgets.
 	Context assemble.Budgets
+	// Prompt, when set, replaces the agent's instructions or prompt, so a
+	// grid can compare prompt versions.
+	Prompt *prompt.Prompt
 }
 
 // RerunReport is what a re-run found. Each result's Case is the variant's
@@ -119,6 +123,9 @@ func (r Rerun) Run(ctx context.Context, recorded record.Run) (RerunReport, error
 		}
 		if v.Context != (assemble.Budgets{}) {
 			a.Context = v.Context
+		}
+		if v.Prompt != nil {
+			a.Instructions, a.Prompt = content.Trusted{}, v.Prompt
 		}
 		a.Hooks = a.Hooks.Only(r.Hooks...)
 		a.Memory, a.Session, a.Approvals = nil, "", nil

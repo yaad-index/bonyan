@@ -22,6 +22,7 @@ import (
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
@@ -515,4 +516,39 @@ func TestALiveToolsOutputIsClassifiedByItsKindNow(t *testing.T) {
 	assert.Equal(t, content.KindRemoteTool, resultKind(last))
 	_, trusted := last.Parts[0].(content.Trusted)
 	assert.False(t, trusted)
+}
+
+// promptSeen scores the prompt each run's calls recorded.
+type promptSeen struct{}
+
+func (promptSeen) Name() string { return "prompt" }
+func (promptSeen) Evaluate(_ context.Context, s score.Subject) ([]score.Score, error) {
+	var out []score.Score
+	for _, c := range s.Run.Calls {
+		if c.Prompt != nil {
+			out = append(out, score.Score{Metric: c.Prompt.ID, Value: 1})
+		}
+	}
+	return out, nil
+}
+
+// A grid can compare prompt versions: each variant's runs are instructed
+// with, and record, that variant's prompt.
+func TestAGridComparesPromptVersions(t *testing.T) {
+	run := recorded(t, searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"}), "find x")
+	m := &searchThenAnswer{args: `{"q":"x"}`}
+	v1 := prompt.Prompt{Name: "helper", Version: "1", Text: "be brief"}
+	v2 := prompt.Prompt{Name: "helper", Version: "2", Text: "be very brief"}
+	rep, err := eval.Rerun{Agent: searchAgent(m, &liveTools{}), Evaluators: []score.Evaluator{promptSeen{}}, Variants: []eval.Variant{
+		{Name: "v1", Prompt: &v1}, {Name: "v2", Prompt: &v2},
+	}}.Run(context.Background(), run)
+	require.NoError(t, err)
+	require.Len(t, rep.Cases, 2)
+	assert.Equal(t, 2.0, aggregate(t, rep.Report, "prompt", "helper@1").Sum, "both of v1's calls")
+	assert.Equal(t, 2.0, aggregate(t, rep.Report, "prompt", "helper@2").Sum)
+	var systems []string
+	for _, req := range m.reqs {
+		systems = append(systems, req.Messages[0].Parts[0].(content.Trusted).String())
+	}
+	assert.Equal(t, []string{"be brief", "be brief", "be very brief", "be very brief"}, systems)
 }

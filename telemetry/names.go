@@ -59,7 +59,10 @@ var (
 //   - bonyan.run.id: the identifier of the run evaluated;
 //   - bonyan.eval.failed: the evaluators that could not score the run;
 //   - bonyan.eval.score: a score an evaluator gave a run, as a histogram,
-//     with bonyan.eval.evaluator and bonyan.eval.metric naming it.
+//     with bonyan.eval.evaluator and bonyan.eval.metric naming it;
+//   - bonyan.prompt.id and bonyan.prompt.hash: on a model call's span, the
+//     versioned prompt the call was made with and the hash of its text, the
+//     ID absent for unversioned instructions; never the text (ADR 0001 §10).
 const (
 	spanStep         = "bonyan.step"
 	keyStepIndex     = attribute.Key("bonyan.step.index")
@@ -72,4 +75,6 @@ const (
 	keyEvalEvaluator = attribute.Key("bonyan.eval.evaluator")
 	keyEvalMetric    = attribute.Key("bonyan.eval.metric")
 	metricEvalScore  = "bonyan.eval.score"
+	keyPromptID      = attribute.Key("bonyan.prompt.id")
+	keyPromptHash    = attribute.Key("bonyan.prompt.hash")
 )
