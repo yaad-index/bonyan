@@ -118,10 +118,12 @@ is applied is not a slot.
 - **The policy decides three things:**
   - **classification:** which content is untrusted, by its source. The sources bonyan names are
     program and operator instructions, user messages, uploads, fetched material, tool output, remote
-    tool output (returned by a tool served over the Model Context Protocol, §5) and recalled memory;
+    tool output (returned by a tool served over the Model Context Protocol, §5), model output read
+    back into a request (§4, §8) and recalled memory;
     a program can register further source kinds, and a policy can classify by any of them. Remote
     tool output is a source of its own so that a policy which trusts the program's own tools does
-    not trust every tool server along with them. Elsewhere in this ADR, "tool output" and "tool
+    not trust every tool server along with them. Model output is a source of its own so that a
+    model's reply read back into a request is never taken for the user's message. Elsewhere in this ADR, "tool output" and "tool
     result" include it;
   - **marking:** how untrusted content is delimited and presented inside its section (the delimiter
     format, labels, an encoding of the text);
