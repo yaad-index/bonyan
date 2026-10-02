@@ -104,7 +104,7 @@ func TestDeletingASubjectDeletesItsFullRecordings(t *testing.T) {
 	require.NoError(t, err)
 	rec, err := record.NewRecorder(full, secret.NewScrubber())
 	require.NoError(t, err)
-	rec.Event(record.Event{Slot: "test", Name: "x"})
+	rec.Event(context.Background(), record.Event{Slot: "test", Name: "x"})
 	require.NoError(t, full.Close())
 	var recordings []string
 	require.NoError(t, filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {

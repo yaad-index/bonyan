@@ -44,13 +44,37 @@ func NewRecorder(sink Sink, scrub *secret.Scrubber) (*Recorder, error) {
 // never fails the call it records, so this is where a broken sink shows.
 func (r *Recorder) WriteFailures() int64 { return r.fails.Load() }
 
+type runKey struct{}
+
+// WithRun returns ctx inside run id: every entry recorded with the returned
+// context, or one derived from it, names the run.
+func WithRun(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, runKey{}, id)
+}
+
+// runOf is the run ctx is inside, or "" outside any.
+func runOf(ctx context.Context) string {
+	id, _ := ctx.Value(runKey{}).(string)
+	return id
+}
+
+// Start records the start of the run ctx is inside.
+func (r *Recorder) Start(ctx context.Context, s Start) {
+	r.write(ctx, Entry{Start: &s})
+}
+
+// End records the end of the run ctx is inside.
+func (r *Recorder) End(ctx context.Context, e End) {
+	r.write(ctx, Entry{End: &e})
+}
+
 // Event records an event.
-func (r *Recorder) Event(ev Event) {
-	r.write(Entry{Event: &ev})
+func (r *Recorder) Event(ctx context.Context, ev Event) {
+	r.write(ctx, Entry{Event: &ev})
 }
 
 // Call records one model call, redacted.
-func (r *Recorder) Call(modelName string, req model.ChatRequest, resp model.ChatResponse, callErr error) {
+func (r *Recorder) Call(ctx context.Context, modelName string, req model.ChatRequest, resp model.ChatResponse, callErr error) {
 	rec := r.red.request(req)
 	c := Call{
 		Seq:         r.seq.Add(1),
@@ -64,11 +88,11 @@ func (r *Recorder) Call(modelName string, req model.ChatRequest, resp model.Chat
 	} else {
 		c.Response = r.red.response(resp)
 	}
-	r.write(Entry{Call: &c})
+	r.write(ctx, Entry{Call: &c})
 }
 
 // Classify records one classifier call, redacted like a chat request's parts.
-func (r *Recorder) Classify(modelName string, text content.Untrusted, resp model.ClassifyResponse, callErr error) {
+func (r *Recorder) Classify(ctx context.Context, modelName string, text content.Untrusted, resp model.ClassifyResponse, callErr error) {
 	in := r.red.part(text)
 	c := Call{
 		Seq:         r.seq.Add(1),
@@ -82,10 +106,11 @@ func (r *Recorder) Classify(modelName string, text content.Untrusted, resp model
 	} else {
 		c.Response = r.red.labels(resp)
 	}
-	r.write(Entry{Call: &c})
+	r.write(ctx, Entry{Call: &c})
 }
 
-func (r *Recorder) write(e Entry) {
+func (r *Recorder) write(ctx context.Context, e Entry) {
+	e.Run = runOf(ctx)
 	if err := r.sink.Write(e); err != nil {
 		r.fails.Add(1)
 	}
@@ -109,7 +134,7 @@ type recordedClassifier struct {
 
 func (c recordedClassifier) Classify(ctx context.Context, text content.Untrusted) (model.ClassifyResponse, error) {
 	resp, err := c.inner.Classify(ctx, text)
-	c.rec.Classify(c.name, text, resp, err)
+	c.rec.Classify(ctx, c.name, text, resp, err)
 	return resp, err
 }
 
@@ -121,7 +146,7 @@ type recordedChat struct {
 
 func (c recordedChat) Chat(ctx context.Context, req model.ChatRequest) (model.ChatResponse, error) {
 	resp, err := c.inner.Chat(ctx, req)
-	c.rec.Call(c.name, req, resp, err)
+	c.rec.Call(ctx, c.name, req, resp, err)
 	return resp, err
 }
 

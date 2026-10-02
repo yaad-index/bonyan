@@ -406,20 +406,20 @@ func (h *Hooks) Approve(ctx context.Context, ev hook.Event) ApprovalVerdict {
 	case pending != "":
 		return ApprovalVerdict{Answer: hook.Pending, By: pending}
 	case approved != "":
-		h.RecordApproval(approved, DecisionApproved)
+		h.RecordApproval(ctx, approved, DecisionApproved)
 		return ApprovalVerdict{Answer: hook.Approve, By: approved}
 	}
-	h.RecordApproval("", DecisionCancelled)
+	h.RecordApproval(ctx, "", DecisionCancelled)
 	return ApprovalVerdict{Answer: hook.Abstain}
 }
 
 // RecordApproval records an outcome at the approval point, with the hook that
 // decided it, or none.
-func (h *Hooks) RecordApproval(name, decision string) {
+func (h *Hooks) RecordApproval(ctx context.Context, name, decision string) {
 	if h == nil || h.rec == nil {
 		return
 	}
-	h.rec.Event(record.Event{Slot: SlotHook, Name: name, Point: string(hook.Approval), Decision: decision})
+	h.rec.Event(ctx, record.Event{Slot: SlotHook, Name: name, Point: string(hook.Approval), Decision: decision})
 }
 
 // scrubEvent returns ev with every resolved secret removed from its content.

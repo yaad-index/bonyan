@@ -63,7 +63,7 @@ func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) 
 	if failure != "" {
 		d = trust.Decision{Verdict: trust.Untrusted}
 	}
-	g.rec.Event(record.Event{
+	g.rec.Event(ctx, record.Event{
 		Slot:     SlotTrust,
 		Name:     g.name,
 		Source:   string(source.Kind),
@@ -94,19 +94,19 @@ func (g guardedHook) answer(ctx context.Context, ev hook.Event) hook.Answer {
 	if !ok {
 		_, failure := call(ctx, func() (struct{}, error) { return struct{}{}, g.inner.Observe(ctx, ev) })
 		if failure != "" {
-			g.event(ev.Point, "", failure)
+			g.event(ctx, ev.Point, "", failure)
 		}
 		return hook.Abstain
 	}
 	a, failure := call(ctx, func() (hook.Answer, error) { return ap.Answer(ctx, ev) })
 	switch {
 	case failure != "":
-		g.event(ev.Point, DecisionDenied, failure)
+		g.event(ctx, ev.Point, DecisionDenied, failure)
 		return hook.Reject
 	case a == hook.Reject:
-		g.event(ev.Point, DecisionDenied, "")
+		g.event(ctx, ev.Point, DecisionDenied, "")
 	case a != hook.Approve && a != hook.Pending && a != hook.Abstain:
-		g.event(ev.Point, DecisionDenied, FailNotAllowed)
+		g.event(ctx, ev.Point, DecisionDenied, FailNotAllowed)
 		return hook.Reject
 	}
 	return a
@@ -119,20 +119,20 @@ func (g guardedHook) run(ctx context.Context, ev hook.Event) (hook.Event, bool, 
 	if !ok {
 		_, failure := call(ctx, func() (struct{}, error) { return struct{}{}, g.inner.Observe(ctx, ev) })
 		if failure != "" {
-			g.event(ev.Point, "", failure)
+			g.event(ctx, ev.Point, "", failure)
 		}
 		return ev, false, false
 	}
 	act, failure := call(ctx, func() (hook.Action, error) { return ic.Intercept(ctx, ev) })
 	if failure != "" {
-		g.event(ev.Point, DecisionDenied, failure)
+		g.event(ctx, ev.Point, DecisionDenied, failure)
 		return ev, false, true
 	}
 	if act.Deny {
 		if hook.Rights(ev.Point)&hook.Deny == 0 {
-			g.event(ev.Point, DecisionDenied, FailNotAllowed)
+			g.event(ctx, ev.Point, DecisionDenied, FailNotAllowed)
 		} else {
-			g.event(ev.Point, DecisionDenied, "")
+			g.event(ctx, ev.Point, DecisionDenied, "")
 		}
 		return ev, false, true
 	}
@@ -141,10 +141,10 @@ func (g guardedHook) run(ctx context.Context, ev hook.Event) (hook.Event, bool, 
 	}
 	next, ok := g.apply(ev, act)
 	if !ok {
-		g.event(ev.Point, DecisionDenied, FailNotAllowed)
+		g.event(ctx, ev.Point, DecisionDenied, FailNotAllowed)
 		return ev, false, true
 	}
-	g.event(ev.Point, DecisionChanged, "")
+	g.event(ctx, ev.Point, DecisionChanged, "")
 	return next, true, false
 }
 
@@ -312,6 +312,6 @@ func textOf(t content.Text) string {
 	return ""
 }
 
-func (g guardedHook) event(p hook.Point, decision string, failure Failure) {
-	g.rec.Event(record.Event{Slot: SlotHook, Name: g.name, Point: string(p), Decision: decision, Failure: string(failure)})
+func (g guardedHook) event(ctx context.Context, p hook.Point, decision string, failure Failure) {
+	g.rec.Event(ctx, record.Event{Slot: SlotHook, Name: g.name, Point: string(p), Decision: decision, Failure: string(failure)})
 }
