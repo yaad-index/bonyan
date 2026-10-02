@@ -424,10 +424,14 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 				rep.Err = fmt.Errorf("agent: tool call %q repeated %d times", tc.Name, r.threshold)
 				return NotCleared(ReasonLoopDetected), rep
 			}
-			msg, approved := r.runTool(ctx, tc)
-			if !approved {
+			msg, reason := r.runTool(ctx, tc)
+			switch reason {
+			case ReasonNotApproved:
 				rep.Err = fmt.Errorf("agent: tool call %q got no approval", tc.Name)
-				return NotCleared(ReasonNotApproved), rep
+				return NotCleared(reason), rep
+			case ReasonReplayMismatch:
+				rep.Err = fmt.Errorf("agent: tool call %q: %w", tc.Name, record.ErrMismatch)
+				return NotCleared(reason), rep
 			}
 			current = append(current, msg)
 		}
@@ -670,12 +674,13 @@ const (
 // reported, to the model and in the recording, by kind only, since an error's
 // text can carry content. Hooks before the call may change its arguments or
 // deny it; hooks after it may change the result, and a failing one withholds
-// it.
-func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bool) {
+// it. A call that got no approval, or that a replay of tools has no recorded
+// result for, ends the run with that reason.
+func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, Reason) {
 	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
 	if v.Denied != "" {
 		r.toolFailed(ctx, tc, record.ToolDenied)
-		return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), true
+		return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), ""
 	}
 	call := tc
 	if len(v.Changed) > 0 {
@@ -687,15 +692,18 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bo
 		switch r.approve(ctx, call, reason) {
 		case hook.Reject:
 			r.toolFailed(ctx, call, record.ToolDenied)
-			return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), true
+			return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), ""
 		case hook.Abstain:
-			return model.Message{}, false
+			return model.Message{}, ReasonNotApproved
 		}
 	}
 	text, failure := r.callTool(ctx, call)
 	ran := failure == ""
 	if !ran {
 		r.toolFailed(ctx, call, failure)
+	}
+	if failure == record.ToolUnmatched {
+		return model.Message{}, ReasonReplayMismatch
 	}
 	kind := content.KindTool
 	if ran {
@@ -714,7 +722,7 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bo
 	case len(v.Changed) > 0:
 		out = v.Event.Result
 	}
-	return toolMessage(tc.ID, out), true
+	return toolMessage(tc.ID, out), ""
 }
 
 // needsApproval reports whether call needs approval, and why.
@@ -778,7 +786,7 @@ func newID() string {
 
 // toolFailed records that call gave the model no result, and why.
 func (r *run) toolFailed(ctx context.Context, call model.ToolCall, failure string) {
-	r.record(ctx, record.Event{Slot: record.SlotTool, Name: call.Name, Failure: failure})
+	r.record(ctx, record.Event{Slot: record.SlotTool, Name: call.Name, Call: call.ID, Failure: failure})
 }
 
 // callTool runs tc and returns its scrubbed output, or bonyan's own text for a
@@ -791,6 +799,8 @@ func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, string) 
 	out, err := r.a.Tools.Call(ctx, tc)
 	end(r.scrub.Scrub(out), err)
 	switch {
+	case errors.Is(err, record.ErrMismatch):
+		return "", record.ToolUnmatched
 	case errors.Is(err, tool.ErrUnknown):
 		return resultUnknown, record.ToolUnknown
 	case errors.Is(err, tool.ErrInvalidArguments):

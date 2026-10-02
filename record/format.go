@@ -185,6 +185,8 @@ type Event struct {
 	// source's ID (never for memory) and what it counted.
 	Item   string `json:"item,omitempty"`
 	Tokens int64  `json:"tokens,omitempty"`
+	// Call is the tool call's ID, on a tool event.
+	Call string `json:"call,omitempty"`
 }
 
 // The events an agent's run records about its own steps: a tool call that gave
@@ -200,11 +202,12 @@ const (
 // a fixed kind; the error's text is never recorded, since it can carry
 // content.
 const (
-	ToolUnknown  = "unknown_tool"      // no tool has the name
-	ToolInvalid  = "invalid_arguments" // the arguments do not match the tool's schema
-	ToolFailed   = "failed"            // the tool returned an error
-	ToolDenied   = "denied"            // a hook or an approver refused the call
-	ToolWithheld = "withheld"          // a hook after the call withheld its result
+	ToolUnknown   = "unknown_tool"      // no tool has the name
+	ToolInvalid   = "invalid_arguments" // the arguments do not match the tool's schema
+	ToolFailed    = "failed"            // the tool returned an error
+	ToolDenied    = "denied"            // a hook or an approver refused the call
+	ToolWithheld  = "withheld"          // a hook after the call withheld its result
+	ToolUnmatched = "unmatched"         // a re-run's call has no recorded result to answer it
 )
 
 func (r Response) usage() *model.Usage {

@@ -22,6 +22,7 @@ const (
 	ReasonDenied            Reason = "denied"             // a hook denied the message, a model call or the reply
 	ReasonPlacement         Reason = "placement"          // a request held untrusted content outside a marked section
 	ReasonTrustRefused      Reason = "trust_refused"      // the trust policy's handling refused a request
+	ReasonReplayMismatch    Reason = "replay_mismatch"    // a re-run's tool call has no recorded result, so nothing is executed
 )
 
 // Outcome is what a run returns: either an answer, or not cleared with a
