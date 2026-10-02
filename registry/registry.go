@@ -405,6 +405,28 @@ type Hooks struct {
 	rec     events
 }
 
+// Only returns the hooks named, at the points they are attached to, and
+// none of the others: what a re-run gets, since a hook runs in a re-run only
+// when opted in by name (ADR 0001 §12). A nil Hooks gives nil.
+func (h *Hooks) Only(names ...string) *Hooks {
+	if h == nil {
+		return nil
+	}
+	keep := map[string]bool{}
+	for _, n := range names {
+		keep[n] = true
+	}
+	out := &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: h.scrub, rec: h.rec}
+	for p, list := range h.byPoint {
+		for _, g := range list {
+			if keep[g.name] {
+				out.byPoint[p] = append(out.byPoint[p], g)
+			}
+		}
+	}
+	return out
+}
+
 // Run calls the hooks attached to ev.Point in their configured order. ev is
 // scrubbed before the first hook sees it; each hook sees the payload as the one
 // before it left it, and the first denial ends the point (ADR 0001 §12). A nil
