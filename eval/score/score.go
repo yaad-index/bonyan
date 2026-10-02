@@ -46,7 +46,12 @@ type Evaluator interface {
 // Evaluate scores s with each evaluator, in order, and names the evaluator in
 // each score. An evaluator that returns an error or panics gives no scores and
 // is named in failed; its error is not kept, since it can quote the run.
+//
+// The evaluators run inside record.WithEvaluation, so a run one makes, such as
+// a judge's, is recorded as evaluation and never handed to a queue: evaluating
+// cannot feed itself.
 func Evaluate(ctx context.Context, s Subject, evaluators ...Evaluator) (scores []Score, failed []string) {
+	ctx = record.WithEvaluation(ctx)
 	for _, e := range evaluators {
 		got, err := evaluate(ctx, e, s)
 		if err != nil {

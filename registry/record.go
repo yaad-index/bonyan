@@ -102,3 +102,12 @@ type discard struct{}
 func (discard) Event(context.Context, record.Event) {}
 
 var errTwoSinks = errors.New("registry: a recording is configured and a sink is also passed with WithSink")
+
+// discardSink keeps nothing. It stands in for a recording when only the
+// evaluation queue needs the recorder.
+type discardSink struct{}
+
+func (discardSink) Write(record.Entry) error { return nil }
+func (discardSink) Full() bool               { return false }
+func (discardSink) Subject() string          { return "" }
+func (discardSink) Close() error             { return nil }

@@ -20,6 +20,9 @@ type Recorder struct {
 	red   redactor
 	seq   atomic.Int64
 	fails atomic.Int64
+	// queue hands finished runs to a queue for live evaluation; nil hands
+	// off none.
+	queue *handoff
 }
 
 // NewRecorder returns a recorder writing to sink. Every resolved value known to
@@ -27,7 +30,7 @@ type Recorder struct {
 // than left to the sink or the caller: a nil scrub is refused, since recording
 // without one would write resolved secrets to disk, and so is a full sink that
 // reports no subject, since its recordings could not be deleted by subject.
-func NewRecorder(sink Sink, scrub *secret.Scrubber) (*Recorder, error) {
+func NewRecorder(sink Sink, scrub *secret.Scrubber, opts ...Option) (*Recorder, error) {
 	if sink == nil {
 		return nil, errors.New("record: no sink")
 	}
@@ -37,7 +40,13 @@ func NewRecorder(sink Sink, scrub *secret.Scrubber) (*Recorder, error) {
 	if sink.Full() && sink.Subject() == "" {
 		return nil, errors.New("record: a full recording needs a subject")
 	}
-	return &Recorder{sink: sink, red: redactor{full: sink.Full(), scrub: scrub}}, nil
+	r := &Recorder{sink: sink, red: redactor{full: sink.Full(), scrub: scrub}}
+	for _, o := range opts {
+		if err := o(r); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 // WriteFailures reports how many entries the sink failed to write. Recording
@@ -58,61 +67,123 @@ func runOf(ctx context.Context) string {
 	return id
 }
 
-// Start records the start of the run ctx is inside.
+// Start records the start of the run ctx is inside, marked as evaluation
+// when ctx is (WithEvaluation).
 func (r *Recorder) Start(ctx context.Context, s Start) {
-	r.write(ctx, Entry{Start: &s})
+	s.Evaluation = Evaluating(ctx)
+	var failure string
+	if r.queue != nil {
+		failure = r.queue.start(ctx, runOf(ctx))
+	}
+	e := Entry{Start: &s}
+	r.write(ctx, e, &e)
+	r.dropped(ctx, failure)
 }
 
-// End records the end of the run ctx is inside.
-func (r *Recorder) End(ctx context.Context, e End) {
-	r.write(ctx, Entry{End: &e})
+// End records the end of the run ctx is inside, and hands the run to the
+// queue when it was kept for one.
+func (r *Recorder) End(ctx context.Context, end End) {
+	e := Entry{End: &end}
+	r.write(ctx, e, &e)
+	if r.queue != nil {
+		r.dropped(ctx, r.queue.end(ctx, runOf(ctx)))
+	}
+}
+
+// DeleteSubject deletes subject from live evaluation: the subject's runs the
+// recorder is still keeping for the queue are forgotten, so none is queued
+// when it ends, and then the subject's queued items are deleted. With no queue
+// it does nothing. It does not touch the sink; record.DeleteSubject deletes
+// full recordings.
+func (r *Recorder) DeleteSubject(ctx context.Context, subject string) error {
+	if r.queue == nil {
+		return nil
+	}
+	// Runs first: a run ending between the two steps is either already
+	// queued, and deleted next, or no longer kept.
+	r.queue.deleteSubject(subject)
+	return r.queue.q.DeleteSubject(ctx, subject)
+}
+
+// dropped records that the run in ctx was to be queued and was not.
+func (r *Recorder) dropped(ctx context.Context, failure string) {
+	if failure != "" {
+		r.Event(ctx, Event{Slot: SlotQueue, Decision: DecisionDropped, Failure: failure})
+	}
 }
 
 // Event records an event.
 func (r *Recorder) Event(ctx context.Context, ev Event) {
-	r.write(ctx, Entry{Event: &ev})
+	e := Entry{Event: &ev}
+	r.write(ctx, e, &e)
 }
 
 // Call records one model call, redacted.
 func (r *Recorder) Call(ctx context.Context, modelName string, req model.ChatRequest, resp model.ChatResponse, callErr error) {
-	rec := r.red.request(req)
-	c := Call{
-		Seq:         r.seq.Add(1),
-		Kind:        KindChat,
-		Model:       modelName,
-		Fingerprint: fingerprint(KindChat, modelName, rec),
-		Request:     &rec,
+	seq := r.seq.Add(1)
+	build := func(red redactor) *Entry {
+		rec := red.request(req)
+		c := Call{
+			Seq:         seq,
+			Kind:        KindChat,
+			Model:       modelName,
+			Fingerprint: fingerprint(KindChat, modelName, rec),
+			Request:     &rec,
+		}
+		if callErr != nil {
+			c.ErrorKind = errorKind(callErr)
+		} else {
+			c.Response = red.response(resp)
+		}
+		return &Entry{Call: &c}
 	}
-	if callErr != nil {
-		c.ErrorKind = errorKind(callErr)
-	} else {
-		c.Response = r.red.response(resp)
-	}
-	r.write(ctx, Entry{Call: &c})
+	r.writeBoth(ctx, build)
 }
 
 // Classify records one classifier call, redacted like a chat request's parts.
 func (r *Recorder) Classify(ctx context.Context, modelName string, text content.Untrusted, resp model.ClassifyResponse, callErr error) {
-	in := r.red.part(text)
-	c := Call{
-		Seq:         r.seq.Add(1),
-		Kind:        KindClassify,
-		Model:       modelName,
-		Fingerprint: fingerprint(KindClassify, modelName, in),
-		Input:       &in,
+	seq := r.seq.Add(1)
+	build := func(red redactor) *Entry {
+		in := red.part(text)
+		c := Call{
+			Seq:         seq,
+			Kind:        KindClassify,
+			Model:       modelName,
+			Fingerprint: fingerprint(KindClassify, modelName, in),
+			Input:       &in,
+		}
+		if callErr != nil {
+			c.ErrorKind = errorKind(callErr)
+		} else {
+			c.Response = red.labels(resp)
+		}
+		return &Entry{Call: &c}
 	}
-	if callErr != nil {
-		c.ErrorKind = errorKind(callErr)
-	} else {
-		c.Response = r.red.labels(resp)
-	}
-	r.write(ctx, Entry{Call: &c})
+	r.writeBoth(ctx, build)
 }
 
-func (r *Recorder) write(ctx context.Context, e Entry) {
+// writeBoth writes a call redacted for the sink, and, when the queue keeps
+// a different kind of recording, redacted again for the queue.
+func (r *Recorder) writeBoth(ctx context.Context, build func(redactor) *Entry) {
+	e := build(r.red)
+	queued := e
+	if r.queue != nil && r.queue.red.full != r.red.full {
+		queued = build(r.queue.red)
+	}
+	r.write(ctx, *e, queued)
+}
+
+// write writes e to the sink, and queued, the same entry redacted for the
+// queue, to the run's kept recording when the run is kept for the queue.
+func (r *Recorder) write(ctx context.Context, e Entry, queued *Entry) {
 	e.Run = runOf(ctx)
 	if err := r.sink.Write(e); err != nil {
 		r.fails.Add(1)
+	}
+	if r.queue != nil && queued != nil {
+		q := *queued
+		q.Run = e.Run
+		r.queue.add(q)
 	}
 }
 

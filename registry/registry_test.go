@@ -178,6 +178,7 @@ func TestEveryPartIsWrapped(t *testing.T) {
 		Classifier: &registry.SlotConfig{Impl: "basic"},
 		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"},
 		Evaluators: []registry.SlotConfig{{Impl: "basic"}},
+		Evaluation: &registry.EvaluationConfig{Queue: registry.SlotConfig{Impl: registry.QueueInMem, Options: json.RawMessage(`{"retention":"1h"}`)}, Rate: 1},
 	}, registry.WithSink(&events{}))
 	require.NoError(t, err)
 
@@ -347,3 +348,66 @@ func (e *renaming) Name() string {
 }
 
 func (e *renaming) Evaluate(context.Context, score.Subject) ([]score.Score, error) { return nil, nil }
+
+func evaluation(rate float64, retention string) *registry.EvaluationConfig {
+	return &registry.EvaluationConfig{
+		Queue: registry.SlotConfig{Impl: registry.QueueInMem, Options: json.RawMessage(`{"retention":"` + retention + `"}`)},
+		Rate:  rate,
+	}
+}
+
+// queueRun records one finished run about subject through c's recorder.
+func queueRun(c registry.Components, id, subject string) {
+	ctx := record.WithSubject(record.WithRun(context.Background(), id), subject)
+	c.Recorder.Start(ctx, record.Start{})
+	c.Recorder.End(ctx, record.End{Outcome: record.OutcomeCleared})
+}
+
+// With live evaluation configured, the recorder hands finished runs to the
+// queue, with or without a recording, and deleting a subject from memory
+// deletes its queued runs.
+func TestLiveEvaluationIsAssembled(t *testing.T) {
+	c, err := newRegistry(t).Assemble(registry.Config{
+		Chat:       registry.SlotConfig{Impl: "basic"},
+		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"},
+		Evaluation: evaluation(1, "1h"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, c.Recorder, "the queue needs the recorder even with no recording")
+	require.NotNil(t, c.EvalQueue)
+	queueRun(c, "a", "ana")
+	queueRun(c, "b", "ben")
+	queueRun(c, "c", "ana")
+	open := record.WithSubject(record.WithRun(context.Background(), "open"), "ana")
+	c.Recorder.Start(open, record.Start{})
+
+	require.NoError(t, c.Memory.DeleteSubject(context.Background(), "ana"))
+	c.Recorder.End(open, record.End{Outcome: record.OutcomeCleared})
+	ctx := context.Background()
+	it, ok, err := c.EvalQueue.Take(ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "b", it.Run)
+	_, ok, err = c.EvalQueue.Take(ctx)
+	require.NoError(t, err)
+	assert.False(t, ok, "ana's runs were deleted with ana, the one still open included")
+
+	c, err = newRegistry(t).Assemble(registry.Config{Chat: registry.SlotConfig{Impl: "basic"}})
+	require.NoError(t, err)
+	assert.Nil(t, c.EvalQueue, "off unless configured")
+	assert.Nil(t, c.Recorder)
+}
+
+func TestLiveEvaluationConfigurationIsChecked(t *testing.T) {
+	for name, ev := range map[string]*registry.EvaluationConfig{
+		"no rate":          evaluation(0, "1h"),
+		"rate above one":   evaluation(2, "1h"),
+		"no retention":     evaluation(1, ""),
+		"zero retention":   evaluation(1, "0s"),
+		"an unknown queue": {Queue: registry.SlotConfig{Impl: "remote"}, Rate: 1},
+		"a negative cap":   {Queue: evaluation(1, "1h").Queue, Rate: 1, MaxRunBytes: -1},
+	} {
+		_, err := newRegistry(t).Assemble(registry.Config{Chat: registry.SlotConfig{Impl: "basic"}, Evaluation: ev})
+		require.Error(t, err, name)
+	}
+}

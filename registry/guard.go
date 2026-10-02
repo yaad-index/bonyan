@@ -337,3 +337,14 @@ func (g guardedEvaluator) Evaluate(ctx context.Context, s score.Subject) ([]scor
 	}
 	return scores, nil
 }
+
+// guardedQueue is bonyan's wrapper around a configured evaluation queue.
+type guardedQueue struct{ inner record.Queue }
+
+func (g guardedQueue) Put(ctx context.Context, it record.Item) error { return g.inner.Put(ctx, it) }
+
+func (g guardedQueue) Take(ctx context.Context) (record.Item, bool, error) { return g.inner.Take(ctx) }
+
+func (g guardedQueue) DeleteSubject(ctx context.Context, subject string) error {
+	return g.inner.DeleteSubject(ctx, subject)
+}
