@@ -52,6 +52,12 @@ type Entry struct {
 type Start struct {
 	// Agent is the agent's name; empty when it has none.
 	Agent string `json:"agent,omitempty"`
+	// Trace and Span identify the run's span when the run was traced, so a
+	// score given later can be attached to the run's trace.
+	Trace string `json:"trace,omitempty"`
+	Span  string `json:"span,omitempty"`
+	// Evaluation marks a run made to evaluate another, such as a judge's.
+	Evaluation bool `json:"evaluation,omitempty"`
 }
 
 // End ends a run with what it did.

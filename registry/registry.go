@@ -48,7 +48,12 @@ const (
 	SlotRecording  = "recording"
 	SlotMemory     = "memory"
 	SlotEvaluator  = "evaluator"
+	SlotQueue      = "eval_queue"
 )
+
+// QueueInMem is the name the in-process evaluation queue is registered under.
+// Its options are {"retention": "<duration>"}, required.
+const QueueInMem = "inmem"
 
 // MemoryInMem is the name the in-process memory backend is registered under.
 const MemoryInMem = "inmem"
@@ -154,6 +159,7 @@ type Registry struct {
 	sinks       *slot[record.Sink]
 	memories    *slot[memory.Backend]
 	evaluators  *slot[score.Evaluator]
+	queues      *slot[record.Queue]
 }
 
 // New returns a registry holding only the built-ins: the default trust policy,
@@ -170,7 +176,9 @@ func New() *Registry {
 		sinks:       newSlot[record.Sink](SlotRecording),
 		memories:    newSlot[memory.Backend](SlotMemory),
 		evaluators:  newSlot[score.Evaluator](SlotEvaluator),
+		queues:      newSlot[record.Queue](SlotQueue),
 	}
+	r.queues.factories[QueueInMem] = memQueue
 	r.policies.factories[trust.DefaultName] = func(json.RawMessage) (trust.Policy, error) {
 		return trust.Default{}, nil
 	}
@@ -266,6 +274,29 @@ func (r *Registry) RegisterEvaluator(name string, f Factory[score.Evaluator]) er
 	return r.evaluators.register(name, f)
 }
 
+// RegisterQueue registers an evaluation queue implementation under name.
+func (r *Registry) RegisterQueue(name string, f Factory[record.Queue]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.queues.register(name, f)
+}
+
+func memQueue(options json.RawMessage) (record.Queue, error) {
+	var o struct {
+		Retention string `json:"retention"`
+	}
+	if len(options) > 0 {
+		if err := json.Unmarshal(options, &o); err != nil {
+			return nil, err
+		}
+	}
+	retention, err := time.ParseDuration(o.Retention)
+	if err != nil || retention <= 0 {
+		return nil, fmt.Errorf(`options need a positive "retention", got %q`, o.Retention)
+	}
+	return record.NewMemQueue(retention)
+}
+
 // SlotConfig selects one implementation for a slot and carries its options.
 type SlotConfig struct {
 	Impl    string          `json:"impl"`
@@ -295,6 +326,19 @@ type Config struct {
 	// Evaluators lists the agent's evaluators (ADR 0001 §8). Each must have a
 	// name of its own.
 	Evaluators []SlotConfig `json:"evaluators,omitempty"`
+	// Evaluation turns on live evaluation: finished runs are handed to a
+	// queue, which an eval.Worker drains. With none, no run is queued.
+	Evaluation *EvaluationConfig `json:"evaluation,omitempty"`
+}
+
+// EvaluationConfig selects the evaluation queue and how runs are handed to it
+// (record.QueueOptions). A queued run is recorded without memory unless Full
+// is set, whatever the recording keeps.
+type EvaluationConfig struct {
+	Queue       SlotConfig `json:"queue"`
+	Rate        float64    `json:"rate"`
+	MaxRunBytes int        `json:"max_run_bytes,omitempty"`
+	Full        bool       `json:"full,omitempty"`
 }
 
 // MemoryConfig selects the memory backend and how long it keeps records.
@@ -329,6 +373,9 @@ type Components struct {
 	Memory *memory.Store
 	// Evaluators are the configured evaluators, in order.
 	Evaluators []score.Evaluator
+	// EvalQueue is the evaluation queue the Recorder hands finished runs to.
+	// It is nil when live evaluation is not configured.
+	EvalQueue record.Queue
 
 	// owned is a sink the registry opened, which Close closes.
 	owned record.Sink
@@ -613,9 +660,28 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		}
 		out.owned = sink
 	}
+	var recOpts []record.Option
+	if cfg.Evaluation != nil {
+		q, err := r.queues.build(cfg.Evaluation.Queue)
+		if err != nil {
+			if out.owned != nil {
+				_ = out.owned.Close()
+			}
+			return Components{}, err
+		}
+		out.EvalQueue = guardedQueue{inner: q}
+		recOpts = append(recOpts, record.WithQueue(out.EvalQueue, record.QueueOptions{
+			Rate: cfg.Evaluation.Rate, MaxRunBytes: cfg.Evaluation.MaxRunBytes, Full: cfg.Evaluation.Full,
+		}))
+		if sink == nil {
+			// Runs are handed to the queue through the recorder, which needs
+			// a sink; with no recording configured it keeps nothing else.
+			sink = discardSink{}
+		}
+	}
 	var ev events = discard{}
 	if sink != nil {
-		rec, err := record.NewRecorder(sink, out.Secrets.Scrubber())
+		rec, err := record.NewRecorder(sink, out.Secrets.Scrubber(), recOpts...)
 		if err != nil {
 			if out.owned != nil {
 				_ = out.owned.Close()
@@ -654,6 +720,9 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			store.OnDeleteSubject("full recordings", func(_ context.Context, subject string) error {
 				return record.DeleteSubject(dir, subject)
 			})
+		}
+		if out.EvalQueue != nil {
+			store.OnDeleteSubject("evaluation queue", out.EvalQueue.DeleteSubject)
 		}
 	}
 	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber(), rec: ev}

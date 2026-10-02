@@ -125,7 +125,9 @@ type Agent struct {
 	// message are recalled into the context, and the message is stored as an
 	// event of Session (ADR 0001 §4).
 	Memory *memory.Store
-	// Subject is who the run is about. It is required with Memory.
+	// Subject is who the run is about. It is required with Memory, and with
+	// a Recorder that hands runs to a queue for live evaluation, which queues
+	// only runs with a subject, so their items can be deleted by subject.
 	Subject string
 	// Session is the session the run belongs to; empty stores no event.
 	Session string
@@ -276,8 +278,12 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	defer cancel()
 	ctx, endRun := a.Telemetry.Run(ctx, a.Name)
 	ctx = record.WithRun(ctx, newID())
+	if a.Subject != "" {
+		ctx = record.WithSubject(ctx, a.Subject)
+	}
 	if a.Recorder != nil {
-		a.Recorder.Start(ctx, record.Start{Agent: a.Name})
+		traceID, spanID := telemetry.SpanOf(ctx)
+		a.Recorder.Start(ctx, record.Start{Agent: a.Name, Trace: traceID, Span: spanID})
 	}
 
 	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter, approvalTimeout: limits.ApprovalTimeout}

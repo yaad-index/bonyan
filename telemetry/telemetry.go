@@ -29,6 +29,7 @@ import (
 
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/tool"
 )
@@ -56,6 +57,7 @@ type Telemetry struct {
 	duration metric.Float64Histogram
 	tokens   metric.Int64Histogram
 	cost     metric.Int64Counter
+	score    metric.Float64Histogram
 	provider string
 	capture  bool
 }
@@ -83,11 +85,17 @@ func New(opts Options) (*Telemetry, error) {
 	if err != nil {
 		return nil, err
 	}
+	score, err := m.Float64Histogram(metricEvalScore, metric.WithUnit("1"),
+		metric.WithDescription("A score an evaluator gave a finished run."))
+	if err != nil {
+		return nil, err
+	}
 	return &Telemetry{
 		tracer:   tp.Tracer(scope, trace.WithSchemaURL(SchemaURL)),
 		duration: duration.Inst(),
 		tokens:   tokens.Inst(),
 		cost:     cost,
+		score:    score,
 		provider: opts.ProviderName,
 		capture:  opts.CaptureContent,
 	}, nil
@@ -335,4 +343,65 @@ func marshal(v any) string {
 		return ""
 	}
 	return string(b)
+}
+
+// SpanOf returns the trace and span IDs of the span in ctx, as hex, and empty
+// strings when ctx holds no valid span.
+func SpanOf(ctx context.Context) (traceID, spanID string) {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return "", ""
+	}
+	return sc.TraceID().String(), sc.SpanID().String()
+}
+
+// EvaluatedRun identifies a finished run whose scores are emitted: its ID, its
+// agent's name, and its span's trace and span IDs as recorded at its start.
+type EvaluatedRun struct {
+	ID, Agent, Trace, Span string
+}
+
+// Scores emits a span for the evaluation of run, linked to the run's span
+// when its IDs are known, and records each score on the bonyan.eval.score
+// histogram under that span. The run's ID is an attribute of the span only,
+// so the metric stays low in cardinality. failed names the evaluators that
+// could not score the run.
+func (t *Telemetry) Scores(ctx context.Context, run EvaluatedRun, scores []score.Score, failed []string) {
+	if t == nil {
+		return
+	}
+	opts := []trace.SpanStartOption{trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(keyRunID.String(run.ID))}
+	if link, ok := spanContext(run.Trace, run.Span); ok {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: link}))
+	}
+	if run.Agent != "" {
+		opts = append(opts, trace.WithAttributes(keyAgentName.String(run.Agent)))
+	}
+	ctx, span := t.tracer.Start(ctx, spanEval, opts...)
+	defer span.End()
+	if len(failed) > 0 {
+		span.SetAttributes(keyEvalFailed.StringSlice(failed))
+		span.SetStatus(codes.Error, "an evaluator failed")
+	}
+	for _, s := range scores {
+		attrs := []attribute.KeyValue{keyEvalEvaluator.String(s.Evaluator), keyEvalMetric.String(s.Metric)}
+		if run.Agent != "" {
+			attrs = append(attrs, keyAgentName.String(run.Agent))
+		}
+		t.score.Record(ctx, s.Value, metric.WithAttributes(attrs...))
+	}
+}
+
+// spanContext is the remote span context traceID and spanID name, when both
+// are valid hex IDs.
+func spanContext(traceID, spanID string) (trace.SpanContext, bool) {
+	tid, err := trace.TraceIDFromHex(traceID)
+	if err != nil {
+		return trace.SpanContext{}, false
+	}
+	sid, err := trace.SpanIDFromHex(spanID)
+	if err != nil {
+		return trace.SpanContext{}, false
+	}
+	return trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, Remote: true}), true
 }

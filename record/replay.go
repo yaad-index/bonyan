@@ -44,6 +44,10 @@ type Run struct {
 	ID string
 	// Agent is the agent's name from the run's start, if it had one.
 	Agent string
+	// Trace and Span identify the run's span, and Evaluation marks a run made
+	// to evaluate another, as the run's start recorded them.
+	Trace, Span string
+	Evaluation  bool
 	// End is how the run ended; nil when the recording holds no end for it, as
 	// for a version 1 recording or a run that never finished.
 	End    *End
@@ -69,7 +73,7 @@ func ReadRuns(r io.Reader) (Header, []Run, error) {
 		}
 		switch {
 		case e.Start != nil:
-			run.Agent = e.Start.Agent
+			run.Agent, run.Trace, run.Span, run.Evaluation = e.Start.Agent, e.Start.Trace, e.Start.Span, e.Start.Evaluation
 		case e.End != nil:
 			end := *e.End
 			run.End = &end

@@ -53,11 +53,23 @@ var (
 //   - bonyan.run.outcome: how a run ended: "cleared", or the reason it was not
 //     cleared;
 //   - bonyan.usage.cost: what a model call cost, in millionths of the price
-//     table's unit, as a span attribute and as a counter.
+//     table's unit, as a span attribute and as a counter;
+//   - span bonyan.eval: the evaluation of one finished run, linked to the
+//     run's span;
+//   - bonyan.run.id: the identifier of the run evaluated;
+//   - bonyan.eval.failed: the evaluators that could not score the run;
+//   - bonyan.eval.score: a score an evaluator gave a run, as a histogram,
+//     with bonyan.eval.evaluator and bonyan.eval.metric naming it.
 const (
-	spanStep        = "bonyan.step"
-	keyStepIndex    = attribute.Key("bonyan.step.index")
-	keyRunOutcome   = attribute.Key("bonyan.run.outcome")
-	keyUsageCost    = attribute.Key("bonyan.usage.cost")
-	metricUsageCost = "bonyan.usage.cost"
+	spanStep         = "bonyan.step"
+	keyStepIndex     = attribute.Key("bonyan.step.index")
+	keyRunOutcome    = attribute.Key("bonyan.run.outcome")
+	keyUsageCost     = attribute.Key("bonyan.usage.cost")
+	metricUsageCost  = "bonyan.usage.cost"
+	spanEval         = "bonyan.eval"
+	keyRunID         = attribute.Key("bonyan.run.id")
+	keyEvalFailed    = attribute.Key("bonyan.eval.failed")
+	keyEvalEvaluator = attribute.Key("bonyan.eval.evaluator")
+	keyEvalMetric    = attribute.Key("bonyan.eval.metric")
+	metricEvalScore  = "bonyan.eval.score"
 )
