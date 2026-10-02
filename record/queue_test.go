@@ -362,3 +362,20 @@ func TestARunWithAnEntryThatCannotBeKeptIsDropped(t *testing.T) {
 	assert.Zero(t, q.Len())
 	assert.Equal(t, []record.Event{{Slot: record.SlotQueue, Decision: record.DecisionDropped, Failure: record.QueueFailed}}, sink.events())
 }
+
+// What a run's start recorded comes back on the run when read.
+func TestARunsStartIsReadBack(t *testing.T) {
+	f := openFile(t, record.FileOptions{})
+	rec := newRecorder(t, f)
+	ctx := record.WithEvaluation(record.WithRun(context.Background(), "judge"))
+	rec.Start(ctx, record.Start{Agent: "judge", Trace: "4bf92f3577b34da6a3ce929d0e0e4736", Span: "00f067aa0ba902b7"})
+	rec.End(ctx, record.End{Outcome: record.OutcomeCleared})
+	_, _, raw := readFile(t, f)
+	_, runs, err := record.ReadRuns(strings.NewReader(raw))
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, "judge", runs[0].Agent)
+	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", runs[0].Trace)
+	assert.Equal(t, "00f067aa0ba902b7", runs[0].Span)
+	assert.True(t, runs[0].Evaluation)
+}
