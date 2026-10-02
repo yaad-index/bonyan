@@ -31,6 +31,7 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/tool"
 )
 
@@ -158,6 +159,12 @@ func (c *tracedChat) Chat(ctx context.Context, req model.ChatRequest) (model.Cha
 	// array.
 	common := slices.Clip(t.withProvider([]attribute.KeyValue{opChat, keyRequestModel.String(c.model)}))
 	attrs := append(common, keyRequestMaxTokens.Int(req.MaxOutputTokens))
+	if ref, ok := prompt.RefOf(ctx); ok {
+		if ref.ID != "" {
+			attrs = append(attrs, keyPromptID.String(ref.ID))
+		}
+		attrs = append(attrs, keyPromptHash.String(ref.Hash))
+	}
 	if t.capture && c.scrub != nil {
 		attrs = append(attrs, captureRequest(req, c.scrub)...)
 	}

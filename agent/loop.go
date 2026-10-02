@@ -17,6 +17,7 @@ import (
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
@@ -57,7 +58,7 @@ type Model struct {
 const DefaultLoopThreshold = 3
 
 // Agent is everything a run needs. Models, Prices, MaxOutputTokens and
-// Instructions are required; the rest is optional.
+// Instructions, or a Prompt in their place, are required; the rest is optional.
 type Agent struct {
 	// Models are tried in order: when a call to one fails, the next is asked
 	// the same request. The first is the primary.
@@ -73,8 +74,13 @@ type Agent struct {
 	// Retry is applied to every call, outside the budget and recording, so
 	// each attempt is charged and recorded.
 	Retry model.RetryPolicy
-	// Instructions are the system instructions.
+	// Instructions are the system instructions. Each call records them as an
+	// unversioned prompt, by the hash of their text.
 	Instructions content.Trusted
+	// Prompt, when set, is the system instructions as a versioned prompt, in
+	// place of Instructions (ADR 0001 §10): each call records its ID and the
+	// hash of its text, never the text. Setting both is an error.
+	Prompt *prompt.Prompt
 	// History is the conversation before this run, oldest first. It holds no
 	// system message and no trusted text, and it is trimmed to the history
 	// budget a whole exchange at a time, oldest first.
@@ -242,6 +248,16 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	if a.MemoryLimit < 0 {
 		return Outcome{}, Report{}, errors.New("agent: the memory limit must not be negative")
 	}
+	instructions, ref := a.Instructions, prompt.Unversioned(a.Instructions)
+	if a.Prompt != nil {
+		if a.Instructions.String() != "" {
+			return Outcome{}, Report{}, errors.New("agent: Instructions and Prompt are both set")
+		}
+		if err := a.Prompt.Validate(); err != nil {
+			return Outcome{}, Report{}, err
+		}
+		instructions, ref = a.Prompt.Instruction(), a.Prompt.Ref()
+	}
 	if a.Output != nil && (a.Output.Schema.IsZero() || a.Output.Retries < 0) {
 		return Outcome{}, Report{}, errors.New("agent: an output needs a schema and zero or more retries")
 	}
@@ -283,10 +299,10 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	}
 	if a.Recorder != nil {
 		traceID, spanID := telemetry.SpanOf(ctx)
-		a.Recorder.Start(ctx, record.Start{Agent: a.Name, Trace: traceID, Span: spanID})
+		a.Recorder.Start(ctx, record.Start{Agent: a.Name, Trace: traceID, Span: spanID, Prompt: &record.PromptRef{ID: ref.ID, Hash: ref.Hash}})
 	}
 
-	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter, approvalTimeout: limits.ApprovalTimeout}
+	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter, approvalTimeout: limits.ApprovalTimeout, instructions: instructions, prompt: ref}
 	r.policy = registry.GuardPolicy(a.Trust, a.Recorder)
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
 	out, rep := r.loop(ctx, limits.MaxSteps, input)
@@ -320,6 +336,10 @@ type run struct {
 	approveAll      bool
 	approvalTimeout time.Duration
 	memory          []content.Text
+	// instructions are the system instructions, and prompt what each of the
+	// agent's own model calls records of them.
+	instructions content.Trusted
+	prompt       prompt.Ref
 }
 
 // validHistory refuses history the pipeline cannot place.
@@ -370,7 +390,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			return NotCleared(ReasonDeadline), rep
 		}
 		req, dropped, err := assemble.Build(assemble.Input{
-			Instructions: r.a.Instructions,
+			Instructions: r.instructions,
 			Memory:       r.memory,
 			Material:     r.material,
 			Earlier:      r.history,
@@ -464,7 +484,9 @@ func (r *run) call(ctx context.Context, req model.ChatRequest) (model.ChatRespon
 		case err != nil:
 			return model.ChatResponse{}, ReasonTrustRefused, err
 		}
-		resp, err := m.Chat(ctx, sent)
+		// Only the agent's own call carries its prompt; a call made for
+		// anything else, such as a classifier, does not.
+		resp, err := m.Chat(prompt.WithRef(ctx, r.prompt), sent)
 		if err == nil {
 			r.hooks.Run(ctx, hook.Event{Point: hook.AfterModel, Response: resp})
 			return resp, "", nil

@@ -10,6 +10,7 @@ import (
 
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/secret"
 )
 
@@ -52,6 +53,15 @@ func NewRecorder(sink Sink, scrub *secret.Scrubber, opts ...Option) (*Recorder, 
 // WriteFailures reports how many entries the sink failed to write. Recording
 // never fails the call it records, so this is where a broken sink shows.
 func (r *Recorder) WriteFailures() int64 { return r.fails.Load() }
+
+// promptOf is the prompt ctx says a call is made with, or nil.
+func promptOf(ctx context.Context) *PromptRef {
+	r, ok := prompt.RefOf(ctx)
+	if !ok {
+		return nil
+	}
+	return &PromptRef{ID: r.ID, Hash: r.Hash}
+}
 
 type runKey struct{}
 
@@ -129,6 +139,7 @@ func (r *Recorder) Call(ctx context.Context, modelName string, req model.ChatReq
 			Model:       modelName,
 			Fingerprint: fingerprint(KindChat, modelName, rec),
 			Request:     &rec,
+			Prompt:      promptOf(ctx),
 		}
 		if callErr != nil {
 			c.ErrorKind = errorKind(callErr)
@@ -151,6 +162,7 @@ func (r *Recorder) Classify(ctx context.Context, modelName string, text content.
 			Model:       modelName,
 			Fingerprint: fingerprint(KindClassify, modelName, in),
 			Input:       &in,
+			Prompt:      promptOf(ctx),
 		}
 		if callErr != nil {
 			c.ErrorKind = errorKind(callErr)

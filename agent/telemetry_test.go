@@ -282,6 +282,7 @@ func TestTelemetryNames(t *testing.T) {
 		"gen_ai.operation.name=chat", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.request.max_tokens",
 		"gen_ai.system_instructions", "gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.response.finish_reasons",
 		"gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "bonyan.usage.cost", "error.type",
+		"bonyan.prompt.hash",
 	}
 	want := map[string][]string{
 		"span invoke_agent helper": append(slices.Clone(run), "gen_ai.agent.name"),

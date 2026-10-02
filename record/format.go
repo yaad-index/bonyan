@@ -58,6 +58,16 @@ type Start struct {
 	Span  string `json:"span,omitempty"`
 	// Evaluation marks a run made to evaluate another, such as a judge's.
 	Evaluation bool `json:"evaluation,omitempty"`
+	// Prompt is the prompt the run's agent was given.
+	Prompt *PromptRef `json:"prompt,omitempty"`
+}
+
+// PromptRef identifies a prompt by its ID, empty for unversioned
+// instructions, and the hash of its text. It never holds the text
+// (ADR 0001 §10).
+type PromptRef struct {
+	ID   string `json:"id,omitempty"`
+	Hash string `json:"hash"`
 }
 
 // End ends a run with what it did.
@@ -82,13 +92,16 @@ const (
 // Call is one recorded model call: a chat call, with Request, or a classifier
 // call, with Input. Embedding calls are not recorded.
 type Call struct {
-	Seq         int64    `json:"seq"`
-	Kind        string   `json:"kind"`
-	Model       string   `json:"model"`
-	Fingerprint string   `json:"fingerprint"`
-	Request     *Request `json:"request,omitempty"`
-	Input       *Part    `json:"input,omitempty"`
-	Response    Response `json:"response"`
+	Seq         int64  `json:"seq"`
+	Kind        string `json:"kind"`
+	Model       string `json:"model"`
+	Fingerprint string `json:"fingerprint"`
+	// Prompt is the prompt the call was made with, when its caller set one
+	// (prompt.WithRef).
+	Prompt   *PromptRef `json:"prompt,omitempty"`
+	Request  *Request   `json:"request,omitempty"`
+	Input    *Part      `json:"input,omitempty"`
+	Response Response   `json:"response"`
 	// ErrorKind is set when the call failed, and Response is then empty.
 	ErrorKind model.ErrorKind `json:"error_kind,omitempty"`
 }
