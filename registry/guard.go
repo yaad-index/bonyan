@@ -3,8 +3,10 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/yaad-index/bonyan/content"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
@@ -314,4 +316,24 @@ func textOf(t content.Text) string {
 
 func (g guardedHook) event(ctx context.Context, p hook.Point, decision string, failure Failure) {
 	g.rec.Event(ctx, record.Event{Slot: SlotHook, Name: g.name, Point: string(p), Decision: decision, Failure: string(failure)})
+}
+
+// guardedEvaluator is bonyan's wrapper around a configured evaluator. Its name
+// is fixed when it is assembled, so a run switches off the evaluator it was
+// given; an evaluator that errors, panics or outlives the context gives no
+// scores and an error naming only the failure's kind, since its own error can
+// quote the run.
+type guardedEvaluator struct {
+	name  string
+	inner score.Evaluator
+}
+
+func (g guardedEvaluator) Name() string { return g.name }
+
+func (g guardedEvaluator) Evaluate(ctx context.Context, s score.Subject) ([]score.Score, error) {
+	scores, failure := call(ctx, func() ([]score.Score, error) { return g.inner.Evaluate(ctx, s) })
+	if failure != "" {
+		return nil, fmt.Errorf("registry: evaluator %q: %s", g.name, failure)
+	}
+	return scores, nil
 }

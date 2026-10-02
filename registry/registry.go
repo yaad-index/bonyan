@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/yaad-index/bonyan/content"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
@@ -46,6 +47,7 @@ const (
 	SlotSecret     = "secret"
 	SlotRecording  = "recording"
 	SlotMemory     = "memory"
+	SlotEvaluator  = "evaluator"
 )
 
 // MemoryInMem is the name the in-process memory backend is registered under.
@@ -151,6 +153,7 @@ type Registry struct {
 	secrets     *slot[secret.Source]
 	sinks       *slot[record.Sink]
 	memories    *slot[memory.Backend]
+	evaluators  *slot[score.Evaluator]
 }
 
 // New returns a registry holding only the built-ins: the default trust policy,
@@ -166,6 +169,7 @@ func New() *Registry {
 		secrets:     newSlot[secret.Source](SlotSecret),
 		sinks:       newSlot[record.Sink](SlotRecording),
 		memories:    newSlot[memory.Backend](SlotMemory),
+		evaluators:  newSlot[score.Evaluator](SlotEvaluator),
 	}
 	r.policies.factories[trust.DefaultName] = func(json.RawMessage) (trust.Policy, error) {
 		return trust.Default{}, nil
@@ -254,6 +258,14 @@ func (r *Registry) RegisterMemory(name string, f Factory[memory.Backend]) error 
 	return r.memories.register(name, f)
 }
 
+// RegisterEvaluator registers an evaluator implementation under name. Package
+// eval registers the evaluators bonyan ships with eval.Register.
+func (r *Registry) RegisterEvaluator(name string, f Factory[score.Evaluator]) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.evaluators.register(name, f)
+}
+
 // SlotConfig selects one implementation for a slot and carries its options.
 type SlotConfig struct {
 	Impl    string          `json:"impl"`
@@ -280,6 +292,9 @@ type Config struct {
 	Recording *SlotConfig `json:"recording,omitempty"`
 	// Memory selects the memory backend. With none, the agent has no memory.
 	Memory *MemoryConfig `json:"memory,omitempty"`
+	// Evaluators lists the agent's evaluators (ADR 0001 §8). Each must have a
+	// name of its own.
+	Evaluators []SlotConfig `json:"evaluators,omitempty"`
 }
 
 // MemoryConfig selects the memory backend and how long it keeps records.
@@ -312,6 +327,8 @@ type Components struct {
 	// Memory is the store over the configured backend, classifying through
 	// Trust. It is nil when no memory is configured.
 	Memory *memory.Store
+	// Evaluators are the configured evaluators, in order.
+	Evaluators []score.Evaluator
 
 	// owned is a sink the registry opened, which Close closes.
 	owned record.Sink
@@ -556,6 +573,25 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		}
 	}
 
+	evaluators := make([]score.Evaluator, 0, len(cfg.Evaluators))
+	named := map[string]bool{}
+	for _, ec := range cfg.Evaluators {
+		e, err := r.evaluators.build(ec)
+		if err != nil {
+			return Components{}, err
+		}
+		if e == nil {
+			return Components{}, fmt.Errorf("registry: evaluator %q: nil", ec.Impl)
+		}
+		// Asked once, so the name checked is the name it keeps.
+		name := e.Name()
+		if name == "" || named[name] {
+			return Components{}, fmt.Errorf("registry: evaluator %q: no name, or a name another evaluator has", ec.Impl)
+		}
+		named[name] = true
+		evaluators = append(evaluators, guardedEvaluator{name: name, inner: e})
+	}
+
 	secretCfgs := cfg.Secrets
 	if len(secretCfgs) == 0 {
 		secretCfgs = []SlotConfig{{Impl: SecretEnv}}
@@ -569,7 +605,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		sources = append(sources, s)
 	}
 
-	out := Components{Secrets: secret.NewResolver(sources...)}
+	out := Components{Secrets: secret.NewResolver(sources...), Evaluators: evaluators}
 	sink := a.sink
 	if cfg.Recording != nil {
 		if sink, err = r.sinks.build(*cfg.Recording); err != nil {

@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/yaad-index/bonyan/agent"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
 )
@@ -23,7 +24,7 @@ type Runner struct {
 	Agent agent.Agent
 	// Evaluators are the agent's evaluators, all on unless a run switches one
 	// off.
-	Evaluators []Evaluator
+	Evaluators []score.Evaluator
 }
 
 // Switch turns evaluators on or off for one Run, by name. An evaluator it
@@ -45,7 +46,10 @@ type Result struct {
 	Case    string
 	Outcome agent.Outcome
 	Report  agent.Report
-	Scores  []Score
+	Scores  []score.Score
+	// Failed names the evaluators that could not score the run. A failing
+	// evaluator does not fail the other evaluators or the run.
+	Failed []string
 }
 
 // Aggregate is one metric over the cases that have it.
@@ -60,7 +64,7 @@ type Aggregate struct {
 // Run runs every case in order and scores each run with the evaluators sw
 // leaves on. An error means the agent or the cases could not be run at all; a
 // run that did not answer is a result, not an error.
-func (r Runner) Run(ctx context.Context, cases []Case, sw Switch) (Report, error) {
+func (r Runner) Run(ctx context.Context, cases []score.Case, sw Switch) (Report, error) {
 	if r.Agent.Recorder != nil {
 		return Report{}, errors.New("eval: the runner records each run itself; leave Agent.Recorder nil")
 	}
@@ -70,7 +74,7 @@ func (r Runner) Run(ctx context.Context, cases []Case, sw Switch) (Report, error
 	if err := checkCases(cases); err != nil {
 		return Report{}, err
 	}
-	on := make([]Evaluator, 0, len(r.Evaluators))
+	on := make([]score.Evaluator, 0, len(r.Evaluators))
 	known := map[string]bool{}
 	for _, e := range r.Evaluators {
 		known[e.Name()] = true
@@ -103,7 +107,7 @@ func (r Runner) Run(ctx context.Context, cases []Case, sw Switch) (Report, error
 
 // runCase runs the agent on c with a recording of its own and scores the run
 // the recording holds.
-func (r Runner) runCase(ctx context.Context, c *Case, evaluators []Evaluator, scrub *secret.Scrubber) (Result, error) {
+func (r Runner) runCase(ctx context.Context, c *score.Case, evaluators []score.Evaluator, scrub *secret.Scrubber) (Result, error) {
 	sink := newMemSink()
 	rec, err := record.NewRecorder(sink, scrub)
 	if err != nil {
@@ -126,8 +130,9 @@ func (r Runner) runCase(ctx context.Context, c *Case, evaluators []Evaluator, sc
 		return Result{}, fmt.Errorf("the run's recording holds %d runs", len(runs))
 	}
 	answer, answered := out.Answer()
-	s := Subject{Run: runs[0], Case: c, Answer: answer, Answered: answered}
-	return Result{Case: c.Name, Outcome: out, Report: report, Scores: Evaluate(s, evaluators...)}, nil
+	s := score.Subject{Run: runs[0], Case: c, Answer: answer, Answered: answered}
+	scores, failed := score.Evaluate(ctx, s, evaluators...)
+	return Result{Case: c.Name, Outcome: out, Report: report, Scores: scores, Failed: failed}, nil
 }
 
 // aggregate summarises each metric over the results that have it.
@@ -211,4 +216,29 @@ func (s *memSink) reader() *bytes.Reader {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return bytes.NewReader(bytes.Clone(s.buf.Bytes()))
+}
+
+// checkCases refuses a case set the report could not tell apart.
+func checkCases(cases []score.Case) error {
+	names := map[string]bool{}
+	for _, c := range cases {
+		if c.Name == "" {
+			return errors.New("eval: a case has no name")
+		}
+		if names[c.Name] {
+			return fmt.Errorf("eval: two cases are named %q", c.Name)
+		}
+		names[c.Name] = true
+		props := map[string]bool{}
+		for _, p := range c.Expect {
+			if p.Name == "" || p.Check == nil {
+				return fmt.Errorf("eval: case %q has a property with no name or no check", c.Name)
+			}
+			if props[p.Name] {
+				return fmt.Errorf("eval: case %q has two properties named %q", c.Name, p.Name)
+			}
+			props[p.Name] = true
+		}
+	}
+	return nil
 }

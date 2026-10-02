@@ -17,6 +17,7 @@ import (
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/eval"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
@@ -112,7 +113,7 @@ func input(s string) content.Untrusted {
 }
 
 // score is the value of a metric among scores, and whether it is there.
-func score(scores []eval.Score, evaluator, metric string) (float64, bool) {
+func valueOf(scores []score.Score, evaluator, metric string) (float64, bool) {
 	for _, s := range scores {
 		if s.Evaluator == evaluator && s.Metric == metric {
 			return s.Value, true
@@ -121,9 +122,9 @@ func score(scores []eval.Score, evaluator, metric string) (float64, bool) {
 	return 0, false
 }
 
-func mustScore(t *testing.T, scores []eval.Score, evaluator, metric string) float64 {
+func mustScore(t *testing.T, scores []score.Score, evaluator, metric string) float64 {
 	t.Helper()
-	v, ok := score(scores, evaluator, metric)
+	v, ok := valueOf(scores, evaluator, metric)
 	require.True(t, ok, "no %s %s in %v", evaluator, metric, scores)
 	return v
 }
@@ -139,7 +140,7 @@ func aggregate(t *testing.T, rep eval.Report, evaluator, metric string) eval.Agg
 	return eval.Aggregate{}
 }
 
-var all = []eval.Evaluator{eval.Loops{}, eval.Waste{}, eval.Outcome{}}
+var all = []score.Evaluator{eval.Loops{}, eval.Waste{}, eval.Outcome{}}
 
 // A case set produces a result per case, with its scores, and aggregates
 // over the cases.
@@ -156,9 +157,9 @@ func TestACaseSetProducesResultsAndAggregates(t *testing.T) {
 		return answer("41"), nil
 	})
 	r := eval.Runner{Agent: a, Evaluators: all}
-	rep, err := r.Run(context.Background(), []eval.Case{
-		{Name: "capital", Input: input("what is the capital of France?"), Expect: []eval.Property{eval.Contains("Paris")}},
-		{Name: "answer", Input: input("what is the answer?"), Expect: []eval.Property{eval.Equals("42"), eval.Contains("4")}},
+	rep, err := r.Run(context.Background(), []score.Case{
+		{Name: "capital", Input: input("what is the capital of France?"), Expect: []score.Property{score.Contains("Paris")}},
+		{Name: "answer", Input: input("what is the answer?"), Expect: []score.Property{score.Equals("42"), score.Contains("4")}},
 		{Name: "forever", Input: input("search forever")},
 	}, nil)
 	require.NoError(t, err)
@@ -214,9 +215,9 @@ func recordRun(t *testing.T, a agent.Agent, in string) []byte {
 	return raw
 }
 
-func evaluateRecording(t *testing.T, raw []byte, evaluators ...eval.Evaluator) []eval.Score {
+func evaluateRecording(t *testing.T, raw []byte, evaluators ...score.Evaluator) []score.Score {
 	t.Helper()
-	runs, err := eval.EvaluateRecording(strings.NewReader(string(raw)), evaluators...)
+	runs, err := eval.EvaluateRecording(context.Background(), strings.NewReader(string(raw)), evaluators...)
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	return runs[0].Scores
@@ -321,7 +322,8 @@ func TestRepeatedStates(t *testing.T) {
 		"classifier calls":     {[]record.Call{classify, classify}, 0},
 		"different requests":   {[]record.Call{answered, {Kind: record.KindChat, Model: "main", Fingerprint: "f2"}}, 0},
 	} {
-		scores := eval.Evaluate(eval.Subject{Run: record.Run{Calls: tc.calls}}, eval.Loops{})
+		scores, failed := score.Evaluate(context.Background(), score.Subject{Run: record.Run{Calls: tc.calls}}, eval.Loops{})
+		require.Empty(t, failed)
 		assert.Equal(t, tc.want, mustScore(t, scores, "loops", "repeated_states"), name)
 		assert.Equal(t, tc.want, mustScore(t, scores, "loops", "loop"), name)
 	}
@@ -360,8 +362,8 @@ func TestWasteCountsWhatWasSpentForNothing(t *testing.T) {
 	}}
 	a.Models = []agent.Model{{Name: "main", Chat: failing}, {Name: "backup", Chat: backup}}
 
-	r := eval.Runner{Agent: a, Evaluators: []eval.Evaluator{eval.Waste{}}}
-	rep, err := r.Run(context.Background(), []eval.Case{{Name: "c", Input: input("find x")}}, nil)
+	r := eval.Runner{Agent: a, Evaluators: []score.Evaluator{eval.Waste{}}}
+	rep, err := r.Run(context.Background(), []score.Case{{Name: "c", Input: input("find x")}}, nil)
 	require.NoError(t, err)
 	res := rep.Cases[0]
 	require.True(t, res.Outcome.Cleared(), "%s", res.Outcome)
@@ -384,17 +386,17 @@ func TestAVersion1RecordingIsScoredFromItsCalls(t *testing.T) {
 	assert.Equal(t, 60.0, mustScore(t, scores, "waste", "cost"), "30 input tokens at 1 and 15 output tokens at 2 per million, in millionths")
 	assert.Equal(t, 0.0, mustScore(t, scores, "waste", "failed_tool_calls"), "version 1 has no tool events")
 	for _, metric := range []string{"hit_step_limit"} {
-		_, ok := score(scores, "loops", metric)
+		_, ok := valueOf(scores, "loops", metric)
 		assert.False(t, ok, metric)
 	}
-	_, ok := score(scores, "outcome", "cleared")
+	_, ok := valueOf(scores, "outcome", "cleared")
 	assert.False(t, ok, "a version 1 recording holds no outcome")
 
 	scores = evaluateRecording(t, raw, eval.Waste{})
-	_, ok = score(scores, "waste", "cost")
+	_, ok = valueOf(scores, "waste", "cost")
 	assert.False(t, ok, "no prices, no cost")
 	scores = evaluateRecording(t, raw, eval.Waste{Prices: budget.PriceTable{"backup": {Input: 1}}})
-	_, ok = score(scores, "waste", "cost")
+	_, ok = valueOf(scores, "waste", "cost")
 	assert.False(t, ok, "a model without a price, no cost")
 }
 
@@ -403,7 +405,7 @@ func TestAVersion1RecordingIsScoredFromItsCalls(t *testing.T) {
 func TestARecordingAloneIsScoredWithoutACase(t *testing.T) {
 	a := newAgent(func(model.ChatRequest, int) (model.ChatResponse, error) { return answer("done"), nil })
 	scores := evaluateRecording(t, recordRun(t, a, "x"), eval.Outcome{})
-	assert.Equal(t, []eval.Score{{Evaluator: "outcome", Metric: "cleared", Value: 1}}, scores)
+	assert.Equal(t, []score.Score{{Evaluator: "outcome", Metric: "cleared", Value: 1}}, scores)
 }
 
 // A run that did not answer has none of its case's properties.
@@ -413,8 +415,8 @@ func TestARunThatDidNotAnswerHasNoProperty(t *testing.T) {
 	})
 	a.Limits = agent.DefaultLimits()
 	a.Limits.MaxSteps = 2
-	always := eval.Property{Name: "anything", Check: func(string) error { return nil }}
-	rep, err := eval.Runner{Agent: a, Evaluators: all}.Run(context.Background(), []eval.Case{{Name: "c", Input: input("x"), Expect: []eval.Property{always}}}, nil)
+	always := score.Property{Name: "anything", Check: func(string) error { return nil }}
+	rep, err := eval.Runner{Agent: a, Evaluators: all}.Run(context.Background(), []score.Case{{Name: "c", Input: input("x"), Expect: []score.Property{always}}}, nil)
 	require.NoError(t, err)
 	scores := rep.Cases[0].Scores
 	assert.Equal(t, 0.0, mustScore(t, scores, "outcome", "cleared"))
@@ -429,7 +431,7 @@ func TestValidAgainst(t *testing.T) {
 		OK bool `json:"ok"`
 	}]()
 	require.NoError(t, err)
-	p := eval.ValidAgainst("verdict", schema)
+	p := score.ValidAgainst("verdict", schema)
 	assert.Equal(t, "valid against verdict", p.Name)
 	require.NoError(t, p.Check(`{"ok":true}`))
 	require.Error(t, p.Check(`{"ok":"yes"}`))
@@ -447,7 +449,7 @@ func TestASwitchedOffEvaluatorGivesNoScoreAndTheLimitsStay(t *testing.T) {
 	repeating.Limits.MaxSteps = 3
 
 	r := eval.Runner{Agent: repeating, Evaluators: all}
-	cases := []eval.Case{{Name: "c", Input: input("find x")}}
+	cases := []score.Case{{Name: "c", Input: input("find x")}}
 	rep, err := r.Run(context.Background(), cases, eval.Switch{"loops": false, "waste": false})
 	require.NoError(t, err)
 	res := rep.Cases[0]
@@ -475,9 +477,35 @@ func TestASwitchedOffEvaluatorGivesNoScoreAndTheLimitsStay(t *testing.T) {
 	assert.Empty(t, rep.Aggregates)
 }
 
+type failingEvaluator struct{}
+
+func (failingEvaluator) Name() string { return "failing" }
+func (failingEvaluator) Evaluate(context.Context, score.Subject) ([]score.Score, error) {
+	return nil, errors.New("judge unavailable")
+}
+
+// A failing evaluator is named in the result; the run and the other
+// evaluators are not affected.
+func TestAFailingEvaluatorIsNamed(t *testing.T) {
+	a := newAgent(func(model.ChatRequest, int) (model.ChatResponse, error) { return answer("done"), nil })
+	evaluators := []score.Evaluator{failingEvaluator{}, eval.Outcome{}}
+	rep, err := eval.Runner{Agent: a, Evaluators: evaluators}.Run(context.Background(), []score.Case{{Name: "c", Input: input("x")}}, nil)
+	require.NoError(t, err)
+	res := rep.Cases[0]
+	assert.True(t, res.Outcome.Cleared())
+	assert.Equal(t, []string{"failing"}, res.Failed)
+	assert.Equal(t, 1.0, mustScore(t, res.Scores, "outcome", "cleared"))
+
+	runs, err := eval.EvaluateRecording(context.Background(), strings.NewReader(string(recordRun(t, a, "x"))), evaluators...)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, []string{"failing"}, runs[0].Failed)
+	assert.Equal(t, []score.Score{{Evaluator: "outcome", Metric: "cleared", Value: 1}}, runs[0].Scores)
+}
+
 func TestTheRunnerRefusesWhatItCannotRun(t *testing.T) {
 	a := newAgent(func(model.ChatRequest, int) (model.ChatResponse, error) { return answer("x"), nil })
-	ok := []eval.Case{{Name: "c", Input: input("x")}}
+	ok := []score.Case{{Name: "c", Input: input("x")}}
 	rec, err := record.NewRecorder(&discard{}, secret.NewScrubber())
 	require.NoError(t, err)
 	withRecorder := a
@@ -487,25 +515,25 @@ func TestTheRunnerRefusesWhatItCannotRun(t *testing.T) {
 
 	for name, tc := range map[string]struct {
 		r     eval.Runner
-		cases []eval.Case
+		cases []score.Case
 		sw    eval.Switch
 	}{
 		"an agent with a recorder": {eval.Runner{Agent: withRecorder, Evaluators: all}, ok, nil},
 		"an unknown switch":        {eval.Runner{Agent: a, Evaluators: all}, ok, eval.Switch{"groundedness": false}},
-		"two evaluators, one name": {eval.Runner{Agent: a, Evaluators: []eval.Evaluator{eval.Loops{}, eval.Loops{Threshold: 2}}}, ok, nil},
-		"a nil evaluator":          {eval.Runner{Agent: a, Evaluators: []eval.Evaluator{nil}}, ok, nil},
-		"a case with no name":      {eval.Runner{Agent: a, Evaluators: all}, []eval.Case{{Input: input("x")}}, nil},
-		"two cases, one name":      {eval.Runner{Agent: a, Evaluators: all}, []eval.Case{ok[0], ok[0]}, nil},
-		"a property with no check": {eval.Runner{Agent: a, Evaluators: all}, []eval.Case{{Name: "c", Input: input("x"), Expect: []eval.Property{{Name: "p"}}}}, nil},
-		"two properties, one name": {eval.Runner{Agent: a, Evaluators: all}, []eval.Case{{Name: "c", Input: input("x"), Expect: []eval.Property{eval.Equals("x"), eval.Equals("x")}}}, nil},
+		"two evaluators, one name": {eval.Runner{Agent: a, Evaluators: []score.Evaluator{eval.Loops{}, eval.Loops{Threshold: 2}}}, ok, nil},
+		"a nil evaluator":          {eval.Runner{Agent: a, Evaluators: []score.Evaluator{nil}}, ok, nil},
+		"a case with no name":      {eval.Runner{Agent: a, Evaluators: all}, []score.Case{{Input: input("x")}}, nil},
+		"two cases, one name":      {eval.Runner{Agent: a, Evaluators: all}, []score.Case{ok[0], ok[0]}, nil},
+		"a property with no check": {eval.Runner{Agent: a, Evaluators: all}, []score.Case{{Name: "c", Input: input("x"), Expect: []score.Property{{Name: "p"}}}}, nil},
+		"two properties, one name": {eval.Runner{Agent: a, Evaluators: all}, []score.Case{{Name: "c", Input: input("x"), Expect: []score.Property{score.Equals("x"), score.Equals("x")}}}, nil},
 		"an agent that cannot run": {eval.Runner{Agent: noModel, Evaluators: all}, ok, nil},
 	} {
 		_, err := tc.r.Run(context.Background(), tc.cases, tc.sw)
 		require.Error(t, err, name)
 	}
-	_, err = eval.EvaluateRecording(strings.NewReader(""), eval.Loops{})
+	_, err = eval.EvaluateRecording(context.Background(), strings.NewReader(""), eval.Loops{})
 	require.Error(t, err, "an empty recording")
-	_, err = eval.EvaluateRecording(strings.NewReader(`{"format":"bonyan-recording","version":2}`), eval.Loops{}, eval.Loops{})
+	_, err = eval.EvaluateRecording(context.Background(), strings.NewReader(`{"format":"bonyan-recording","version":2}`), eval.Loops{}, eval.Loops{})
 	require.Error(t, err, "two evaluators, one name")
 }
 
