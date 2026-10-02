@@ -496,3 +496,23 @@ func TestReRunsAreRecordedAsEvaluation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1.0, mustScore(t, rep.Cases[0].Scores, "mark", "evaluation"))
 }
+
+// A live tool's output is classified by the kind its tool reports now, not
+// the recorded kind: a tool recorded as the program's own that now reports a
+// tool server is not trusted live.
+func TestALiveToolsOutputIsClassifiedByItsKindNow(t *testing.T) {
+	orig := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r", kind: content.KindTool})
+	orig.Trust = trustOnly(content.KindTool)
+	run := recorded(t, orig, "find x")
+
+	m := &searchThenAnswer{args: `{"q":"x"}`}
+	a := searchAgent(m, &liveTools{out: "LIVE", kind: content.KindRemoteTool})
+	a.Trust = trustOnly(content.KindTool)
+	_, err := eval.Rerun{Agent: a, LiveTools: []string{"search"}}.Run(context.Background(), run)
+	require.NoError(t, err)
+	last := m.reqs[1].Messages[len(m.reqs[1].Messages)-1]
+	assert.Equal(t, "LIVE", resultText(last))
+	assert.Equal(t, content.KindRemoteTool, resultKind(last))
+	_, trusted := last.Parts[0].(content.Trusted)
+	assert.False(t, trusted)
+}

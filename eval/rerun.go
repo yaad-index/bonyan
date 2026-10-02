@@ -322,8 +322,13 @@ func (t *replayTools) Call(ctx context.Context, tc model.ToolCall) (string, erro
 }
 
 // Source is the source kind the tool's results were recorded under, so the
-// trust policy classifies a replayed result as it classified the original.
+// trust policy classifies a replayed result as it classified the original. A
+// live tool's output is new, so it is classified by the kind its tool reports
+// now.
 func (t *replayTools) Source(name string) content.Kind {
+	if t.liveSet[name] && t.live != nil {
+		return t.live.Source(name)
+	}
 	if k, ok := t.kinds[name]; ok {
 		return k
 	}
