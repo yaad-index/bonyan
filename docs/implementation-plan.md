@@ -174,6 +174,9 @@ The eval runner, cases, reports, and the deterministic evaluators (loops, most o
 The groundedness and unused-context evaluators under the invariants, with their own budget, and agreement with hand labels reported beside the score. "Unverifiable" when the material is not in the recording. The opt-in asynchronous hand-off, where a queued item is a recording.
 *Tests:* a claim resting on memory absent from the recording is reported unverifiable, not unsupported; an evaluator call is charged to its own budget, not the evaluated run's; an answer containing an instruction aimed at the judge stays inside the untrusted section; live evaluation is off unless enabled; delete by subject removes queued items.
 
+### Later: versioned prompts
+Prompts as versioned assets, with an identifier recorded on every call, so a recording or a trace says which prompt version produced it (ADR 0001 §10). The model-based evaluators' own prompts are the first to need one. It comes after phase 17.
+
 ### Phase 18: re-runs
 Repeated and parameter-grid re-runs of a recorded input. Tools are answered from the recording by default, and the grid is limited to configured models.
 *Tests:* a re-run executes no live tool unless that tool is opted in; a tool call with no recorded match fails that cell instead of executing; an action needing approval is not auto-approved; a grid naming an unconfigured model is refused unless the operator names it explicitly.
