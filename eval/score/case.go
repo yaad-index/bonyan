@@ -1,4 +1,4 @@
-package eval
+package score
 
 import (
 	"errors"
@@ -54,29 +54,4 @@ func ValidAgainst(name string, schema tool.Schema) Property {
 	return Property{Name: "valid against " + name, Check: func(answer string) error {
 		return schema.Validate([]byte(answer))
 	}}
-}
-
-// checkCases refuses a case set the report could not tell apart.
-func checkCases(cases []Case) error {
-	names := map[string]bool{}
-	for _, c := range cases {
-		if c.Name == "" {
-			return errors.New("eval: a case has no name")
-		}
-		if names[c.Name] {
-			return fmt.Errorf("eval: two cases are named %q", c.Name)
-		}
-		names[c.Name] = true
-		props := map[string]bool{}
-		for _, p := range c.Expect {
-			if p.Name == "" || p.Check == nil {
-				return fmt.Errorf("eval: case %q has a property with no name or no check", c.Name)
-			}
-			if props[p.Name] {
-				return fmt.Errorf("eval: case %q has two properties named %q", c.Name, p.Name)
-			}
-			props[p.Name] = true
-		}
-	}
-	return nil
 }

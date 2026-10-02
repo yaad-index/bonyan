@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/bonyan/content"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
@@ -56,7 +57,25 @@ func newRegistry(t *testing.T) *registry.Registry {
 	require.NoError(t, r.RegisterClassifier("basic", func(json.RawMessage) (model.Classifier, error) {
 		return fakeClassifier{}, nil
 	}))
+	require.NoError(t, r.RegisterEvaluator("basic", func(json.RawMessage) (score.Evaluator, error) {
+		return fakeEvaluator{name: "basic"}, nil
+	}))
 	return r
+}
+
+// fakeEvaluator gives one score, or does what f does when it is set.
+type fakeEvaluator struct {
+	name string
+	f    func() ([]score.Score, error)
+}
+
+func (e fakeEvaluator) Name() string { return e.name }
+
+func (e fakeEvaluator) Evaluate(context.Context, score.Subject) ([]score.Score, error) {
+	if e.f != nil {
+		return e.f()
+	}
+	return []score.Score{{Metric: "m", Value: 1}}, nil
 }
 
 func TestUnknownImplementationFailsAssembly(t *testing.T) {
@@ -158,6 +177,7 @@ func TestEveryPartIsWrapped(t *testing.T) {
 		Embedder:   &registry.SlotConfig{Impl: "basic"},
 		Classifier: &registry.SlotConfig{Impl: "basic"},
 		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"},
+		Evaluators: []registry.SlotConfig{{Impl: "basic"}},
 	}, registry.WithSink(&events{}))
 	require.NoError(t, err)
 
@@ -176,6 +196,13 @@ func TestEveryPartIsWrapped(t *testing.T) {
 		v := parts.Field(i)
 		require.False(t, v.IsNil(), "%s not assembled", field)
 		want := cmp.Or(wrapperPkg[field], registryPkg)
+		if v.Kind() == reflect.Slice {
+			require.Positive(t, v.Len(), "%s not assembled", field)
+			for j := 0; j < v.Len(); j++ {
+				assert.Equal(t, want, v.Index(j).Elem().Type().PkgPath(), "%s[%d] is not bonyan's wrapper", field, j)
+			}
+			continue
+		}
 		assert.Equal(t, want, v.Elem().Type().PkgPath(), "%s is not bonyan's wrapper", field)
 	}
 
@@ -265,3 +292,58 @@ func TestSecretSources(t *testing.T) {
 	require.ErrorIs(t, err, registry.ErrUnknown)
 	assert.Contains(t, err.Error(), `secret "remote-store" (registered: [dir env program])`)
 }
+
+// A configured evaluator keeps the name it had when assembled, and one that
+// fails or panics gives no scores and an error that does not quote it.
+func TestAnEvaluatorIsGuarded(t *testing.T) {
+	const planted = "PLANTED-EVALUATOR-TEXT-5e07"
+	names := []string{"steady", "steady"}
+	r := newRegistry(t)
+	require.NoError(t, r.RegisterEvaluator("renaming", func(json.RawMessage) (score.Evaluator, error) {
+		return &renaming{names: names}, nil
+	}))
+	require.NoError(t, r.RegisterEvaluator("failing", func(json.RawMessage) (score.Evaluator, error) {
+		return fakeEvaluator{name: "failing", f: func() ([]score.Score, error) { return nil, errors.New(planted) }}, nil
+	}))
+	require.NoError(t, r.RegisterEvaluator("panicking", func(json.RawMessage) (score.Evaluator, error) {
+		return fakeEvaluator{name: "panicking", f: func() ([]score.Score, error) { panic(planted) }}, nil
+	}))
+	c, err := r.Assemble(registry.Config{
+		Chat:       registry.SlotConfig{Impl: "basic"},
+		Evaluators: []registry.SlotConfig{{Impl: "renaming"}, {Impl: "failing"}, {Impl: "panicking"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, c.Evaluators, 3)
+	assert.Equal(t, "steady", c.Evaluators[0].Name())
+	assert.Equal(t, "steady", c.Evaluators[0].Name(), "the name does not follow the implementation")
+
+	ctx := context.Background()
+	for _, e := range c.Evaluators[1:] {
+		scores, err := e.Evaluate(ctx, score.Subject{})
+		require.Error(t, err, e.Name())
+		assert.Empty(t, scores)
+		assert.NotContains(t, err.Error(), planted)
+	}
+
+	_, err = r.Assemble(registry.Config{
+		Chat:       registry.SlotConfig{Impl: "basic"},
+		Evaluators: []registry.SlotConfig{{Impl: "basic"}, {Impl: "basic"}},
+	})
+	require.Error(t, err, "two evaluators with one name")
+}
+
+// renaming answers a different name after the first time it is asked.
+type renaming struct {
+	names []string
+	n     int
+}
+
+func (e *renaming) Name() string {
+	if e.n == 0 {
+		e.n++
+		return e.names[0]
+	}
+	return "renamed"
+}
+
+func (e *renaming) Evaluate(context.Context, score.Subject) ([]score.Score, error) { return nil, nil }

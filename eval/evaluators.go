@@ -1,8 +1,11 @@
 package eval
 
 import (
+	"context"
+
 	"github.com/yaad-index/bonyan/agent"
 	"github.com/yaad-index/bonyan/budget"
+	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 )
@@ -30,7 +33,7 @@ type Loops struct {
 func (Loops) Name() string { return "loops" }
 
 // Evaluate scores s.
-func (l Loops) Evaluate(s Subject) []Score {
+func (l Loops) Evaluate(_ context.Context, s score.Subject) ([]score.Score, error) {
 	threshold := l.Threshold
 	if threshold == 0 {
 		threshold = agent.DefaultLoopThreshold
@@ -38,7 +41,7 @@ func (l Loops) Evaluate(s Subject) []Score {
 	repeated, most := repeatedCalls(s.Run)
 	states := repeatedStates(s.Run)
 	loop := states > 0 || (threshold > 0 && most >= threshold)
-	out := []Score{
+	out := []score.Score{
 		{Metric: "repeated_tool_calls", Value: float64(repeated)},
 		{Metric: "max_identical_tool_calls", Value: float64(most)},
 		{Metric: "repeated_states", Value: float64(states)},
@@ -46,9 +49,9 @@ func (l Loops) Evaluate(s Subject) []Score {
 	if end := s.Run.End; end != nil {
 		hit := end.Outcome == string(agent.ReasonStepLimit)
 		loop = loop || hit || end.Outcome == string(agent.ReasonLoopDetected)
-		out = append(out, Score{Metric: "hit_step_limit", Value: flag(hit)})
+		out = append(out, score.Score{Metric: "hit_step_limit", Value: flag(hit)})
 	}
-	return append(out, Score{Metric: "loop", Value: flag(loop)})
+	return append(out, score.Score{Metric: "loop", Value: flag(loop)}), nil
 }
 
 // Waste reports what a run spent and what it spent for nothing (ADR 0001 §8).
@@ -75,15 +78,15 @@ type Waste struct {
 func (Waste) Name() string { return "waste" }
 
 // Evaluate scores s.
-func (w Waste) Evaluate(s Subject) []Score {
-	var out []Score
+func (w Waste) Evaluate(_ context.Context, s score.Subject) ([]score.Score, error) {
+	var out []score.Score
 	if end := s.Run.End; end != nil {
-		out = append(out, Score{Metric: "tokens", Value: float64(end.Tokens)}, Score{Metric: "cost", Value: float64(end.Cost)})
+		out = append(out, score.Score{Metric: "tokens", Value: float64(end.Tokens)}, score.Score{Metric: "cost", Value: float64(end.Cost)})
 	} else {
 		tokens, cost, priced := w.spent(s.Run)
-		out = append(out, Score{Metric: "tokens", Value: float64(tokens)})
+		out = append(out, score.Score{Metric: "tokens", Value: float64(tokens)})
 		if priced {
-			out = append(out, Score{Metric: "cost", Value: float64(cost)})
+			out = append(out, score.Score{Metric: "cost", Value: float64(cost)})
 		}
 	}
 	repeated, _ := repeatedCalls(s.Run)
@@ -102,11 +105,11 @@ func (w Waste) Evaluate(s Subject) []Score {
 		}
 	}
 	return append(out,
-		Score{Metric: "redundant_tool_calls", Value: float64(repeated)},
-		Score{Metric: "failed_tool_calls", Value: float64(failedTools)},
-		Score{Metric: "failed_model_calls", Value: float64(failedModels)},
-		Score{Metric: "output_retries", Value: float64(retries)},
-	)
+		score.Score{Metric: "redundant_tool_calls", Value: float64(repeated)},
+		score.Score{Metric: "failed_tool_calls", Value: float64(failedTools)},
+		score.Score{Metric: "failed_model_calls", Value: float64(failedModels)},
+		score.Score{Metric: "output_retries", Value: float64(retries)},
+	), nil
 }
 
 // spent sums a run's recorded usage, and prices it when every model called
@@ -147,21 +150,21 @@ type Outcome struct{}
 func (Outcome) Name() string { return "outcome" }
 
 // Evaluate scores s.
-func (Outcome) Evaluate(s Subject) []Score {
-	var out []Score
+func (Outcome) Evaluate(_ context.Context, s score.Subject) ([]score.Score, error) {
+	var out []score.Score
 	if end := s.Run.End; end != nil {
-		out = append(out, Score{Metric: "cleared", Value: flag(end.Outcome == record.OutcomeCleared)})
+		out = append(out, score.Score{Metric: "cleared", Value: flag(end.Outcome == record.OutcomeCleared)})
 	}
 	if s.Case == nil {
-		return out
+		return out, nil
 	}
 	all := s.Answered
 	for _, p := range s.Case.Expect {
 		held := s.Answered && p.Check(s.Answer) == nil
 		all = all && held
-		out = append(out, Score{Metric: "property: " + p.Name, Value: flag(held)})
+		out = append(out, score.Score{Metric: "property: " + p.Name, Value: flag(held)})
 	}
-	return append(out, Score{Metric: "expected", Value: flag(all)})
+	return append(out, score.Score{Metric: "expected", Value: flag(all)}), nil
 }
 
 // repeatedCalls counts the tool calls a run's model requested that repeat an
