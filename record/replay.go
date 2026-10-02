@@ -20,9 +20,75 @@ var ErrMismatch = errors.New("record: request does not match the recording")
 // ErrExhausted reports a request after every recorded call has been served.
 var ErrExhausted = errors.New("record: no recorded call left")
 
-// Read reads a recording: its header and its calls, in order. Events are
-// skipped. A recording in another format or version is refused.
+// Read reads a recording: its header and its calls, in order. Events and run
+// boundaries are skipped. A recording in another format, or a version this
+// package does not read, is refused.
 func Read(r io.Reader) (Header, []Call, error) {
+	h, entries, err := readEntries(r)
+	if err != nil {
+		return Header{}, nil, err
+	}
+	var calls []Call
+	for _, e := range entries {
+		if e.Call != nil {
+			calls = append(calls, *e.Call)
+		}
+	}
+	return h, calls, nil
+}
+
+// Run is one run's part of a recording.
+type Run struct {
+	// ID is the run's identifier. It is empty for the entries written outside
+	// any run, which are every entry of a version 1 recording.
+	ID string
+	// Agent is the agent's name from the run's start, if it had one.
+	Agent string
+	// End is how the run ended; nil when the recording holds no end for it, as
+	// for a version 1 recording or a run that never finished.
+	End    *End
+	Calls  []Call
+	Events []Event
+}
+
+// ReadRuns reads a recording and returns its entries grouped by run, in the
+// order each run first appears, so runs recorded at the same time come apart.
+func ReadRuns(r io.Reader) (Header, []Run, error) {
+	h, entries, err := readEntries(r)
+	if err != nil {
+		return Header{}, nil, err
+	}
+	var runs []*Run
+	byID := map[string]*Run{}
+	for _, e := range entries {
+		run, ok := byID[e.Run]
+		if !ok {
+			run = &Run{ID: e.Run}
+			byID[e.Run] = run
+			runs = append(runs, run)
+		}
+		switch {
+		case e.Start != nil:
+			run.Agent = e.Start.Agent
+		case e.End != nil:
+			end := *e.End
+			run.End = &end
+		case e.Call != nil:
+			run.Calls = append(run.Calls, *e.Call)
+		case e.Event != nil:
+			run.Events = append(run.Events, *e.Event)
+		}
+	}
+	out := make([]Run, len(runs))
+	for i, run := range runs {
+		out[i] = *run
+	}
+	return h, out, nil
+}
+
+// readEntries reads a recording's header and entries. It reads every version
+// from 1 to Version; a version 1 recording's entries name no run.
+func readEntries(r io.Reader) (Header, []Entry, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	if !sc.Scan() {
@@ -35,23 +101,21 @@ func Read(r io.Reader) (Header, []Call, error) {
 	if err := json.Unmarshal(sc.Bytes(), &h); err != nil {
 		return Header{}, nil, fmt.Errorf("record: header: %w", err)
 	}
-	if h.Format != Format || h.Version != Version {
+	if h.Format != Format || h.Version < 1 || h.Version > Version {
 		return Header{}, nil, fmt.Errorf("record: unsupported recording %q version %d", h.Format, h.Version)
 	}
-	var calls []Call
+	var entries []Entry
 	for line := 2; sc.Scan(); line++ {
 		var e Entry
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
 			return Header{}, nil, fmt.Errorf("record: line %d: %w", line, err)
 		}
-		if e.Call != nil {
-			calls = append(calls, *e.Call)
-		}
+		entries = append(entries, e)
 	}
 	if err := sc.Err(); err != nil {
 		return Header{}, nil, fmt.Errorf("record: %w", err)
 	}
-	return h, calls, nil
+	return h, entries, nil
 }
 
 // Replay serves recorded calls in the order they were recorded, so a test runs

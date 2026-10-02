@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 
@@ -93,11 +94,11 @@ func WithSink(sink record.Sink) Option {
 // configured, events are dropped, which Assemble allows only when nothing
 // configured has to be recorded (see ErrNoRecorder).
 type events interface {
-	Event(ev record.Event)
+	Event(ctx context.Context, ev record.Event)
 }
 
 type discard struct{}
 
-func (discard) Event(record.Event) {}
+func (discard) Event(context.Context, record.Event) {}
 
 var errTwoSinks = errors.New("registry: a recording is configured and a sink is also passed with WithSink")

@@ -100,7 +100,9 @@ type Agent struct {
 	// material where they enter the run, and marks and handles every request
 	// at the enforcement point (ADR 0001 §3).
 	Trust trust.Policy
-	// Recorder records every call; nil records nothing.
+	// Recorder records every call, the run's start and end, each tool call
+	// that gave no result and each answer sent back for another try; nil
+	// records nothing.
 	Recorder *record.Recorder
 	// Hooks are the hooks attached to each point (registry.Components.Hooks);
 	// nil runs none. A hook may change or deny where ADR 0001 §12 allows.
@@ -273,6 +275,10 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	ctx, cancel := context.WithTimeout(ctx, limits.Deadline)
 	defer cancel()
 	ctx, endRun := a.Telemetry.Run(ctx, a.Name)
+	ctx = record.WithRun(ctx, newID())
+	if a.Recorder != nil {
+		a.Recorder.Start(ctx, record.Start{Agent: a.Name})
+	}
 
 	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter, approvalTimeout: limits.ApprovalTimeout}
 	r.policy = registry.GuardPolicy(a.Trust, a.Recorder)
@@ -285,6 +291,9 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	}
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunEnd, Outcome: ended})
 	endRun(ended, out.Cleared())
+	if a.Recorder != nil {
+		a.Recorder.End(ctx, record.End{Outcome: ended, Steps: rep.Steps, Tokens: rep.Tokens, Cost: rep.Cost})
+	}
 	return out, rep, nil
 }
 
@@ -366,7 +375,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			rep.Err = err
 			return NotCleared(ReasonBudgetLimit), rep
 		}
-		r.recordDropped(dropped)
+		r.recordDropped(ctx, dropped)
 		req.MaxOutputTokens = r.a.MaxOutputTokens
 		if r.a.Output != nil {
 			req.Schema = r.a.Output.Schema.JSON()
@@ -384,6 +393,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 					return NotCleared(ReasonInvalidOutput), rep
 				}
 				retries++
+				r.record(ctx, record.Event{Slot: record.SlotOutput, Decision: record.DecisionRetry})
 				current = append(current, retryMessage(err))
 				continue
 			}
@@ -495,14 +505,18 @@ const (
 	labelResult = "tool result"
 )
 
+// record records ev, when the run is recorded.
+func (r *run) record(ctx context.Context, ev record.Event) {
+	if r.a.Recorder != nil {
+		r.a.Recorder.Event(ctx, ev)
+	}
+}
+
 // recordDropped records every item left out of a call's context: its section,
 // source and size. assemble never reports a memory item's ID.
-func (r *run) recordDropped(dropped []assemble.Dropped) {
-	if r.a.Recorder == nil {
-		return
-	}
+func (r *run) recordDropped(ctx context.Context, dropped []assemble.Dropped) {
 	for _, d := range dropped {
-		r.a.Recorder.Event(record.Event{
+		r.record(ctx, record.Event{
 			Slot: "assemble", Name: d.Section, Decision: "dropped",
 			Source: string(d.Source.Kind), Item: d.Source.ID, Tokens: d.Tokens,
 		})
@@ -571,7 +585,7 @@ func (r *run) useMemory(ctx context.Context, from content.Provenance, message st
 	}
 	recalled, err := r.a.Memory.Recall(ctx, r.a.Subject, message, limit)
 	if err != nil {
-		r.memoryFailed("recall")
+		r.memoryFailed(ctx, "recall")
 	} else if len(recalled) > 0 {
 		v := r.hooks.Run(ctx, hook.Event{Point: hook.MemoryRecall, Memory: recalled})
 		switch {
@@ -593,16 +607,14 @@ func (r *run) useMemory(ctx context.Context, from content.Provenance, message st
 		message = v.Event.Message.Raw()
 	}
 	if err := r.a.Memory.Append(ctx, r.a.Subject, r.a.Session, from.Kind, message); err != nil {
-		r.memoryFailed("write")
+		r.memoryFailed(ctx, "write")
 	}
 }
 
 // memoryFailed records that memory failed at op. The error's text is not
 // recorded, since it can carry content.
-func (r *run) memoryFailed(op string) {
-	if r.a.Recorder != nil {
-		r.a.Recorder.Event(record.Event{Slot: "memory", Name: op, Failure: string(registry.FailError)})
-	}
+func (r *run) memoryFailed(ctx context.Context, op string) {
+	r.record(ctx, record.Event{Slot: "memory", Name: op, Failure: string(registry.FailError)})
 }
 
 // textOf is the text of a user message, trusted or not.
@@ -647,12 +659,14 @@ const (
 
 // runTool runs one call and returns the message carrying its result. The
 // result is untrusted and scrubbed of resolved secrets, and a failure is
-// reported by kind only, since an error's text can carry content. Hooks before
-// the call may change its arguments or deny it; hooks after it may change the
-// result, and a failing one withholds it.
+// reported, to the model and in the recording, by kind only, since an error's
+// text can carry content. Hooks before the call may change its arguments or
+// deny it; hooks after it may change the result, and a failing one withholds
+// it.
 func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bool) {
 	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
 	if v.Denied != "" {
+		r.toolFailed(ctx, tc, record.ToolDenied)
 		return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), true
 	}
 	call := tc
@@ -664,12 +678,17 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bo
 	if reason, needed := r.needsApproval(call); needed {
 		switch r.approve(ctx, call, reason) {
 		case hook.Reject:
+			r.toolFailed(ctx, call, record.ToolDenied)
 			return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), true
 		case hook.Abstain:
 			return model.Message{}, false
 		}
 	}
-	text, ran := r.callTool(ctx, call)
+	text, failure := r.callTool(ctx, call)
+	ran := failure == ""
+	if !ran {
+		r.toolFailed(ctx, call, failure)
+	}
 	kind := content.KindTool
 	if ran {
 		kind = r.a.Tools.Source(call.Name)
@@ -682,6 +701,7 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, bo
 	v = r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool, Call: call, Result: result, Trusted: out.Trusted()})
 	switch {
 	case v.Denied != "":
+		r.toolFailed(ctx, call, record.ToolWithheld)
 		out = toolText(tc.ID, resultWithheld)
 	case len(v.Changed) > 0:
 		out = v.Event.Result
@@ -704,18 +724,18 @@ func (r *run) needsApproval(call model.ToolCall) (hook.ApprovalReason, bool) {
 // Approve, Reject, or Abstain for an action cancelled because nothing decided
 // it in time (ADR 0001 §7, §12).
 func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.ApprovalReason) hook.Answer {
-	id := approvalID()
+	id := newID()
 	v := r.hooks.Approve(ctx, hook.Event{Call: call, Approval: hook.ApprovalRequest{ID: id, Reason: reason}})
 	if v.Answer != hook.Pending {
 		return v.Answer
 	}
 	if r.a.Approvals == nil {
-		r.hooks.RecordApproval(v.By, registry.DecisionCancelled)
+		r.hooks.RecordApproval(ctx, v.By, registry.DecisionCancelled)
 		return hook.Abstain
 	}
 	decided, err := r.a.Approvals.Hold(ctx, approval.Pending{ID: id, Tool: call.Name})
 	if err != nil {
-		r.hooks.RecordApproval(v.By, registry.DecisionCancelled)
+		r.hooks.RecordApproval(ctx, v.By, registry.DecisionCancelled)
 		return hook.Abstain
 	}
 	wait := ctx
@@ -727,48 +747,53 @@ func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.Appr
 	select {
 	case ok := <-decided:
 		if ok {
-			r.hooks.RecordApproval(v.By, registry.DecisionApproved)
+			r.hooks.RecordApproval(ctx, v.By, registry.DecisionApproved)
 			return hook.Approve
 		}
-		r.hooks.RecordApproval(v.By, registry.DecisionDenied)
+		r.hooks.RecordApproval(ctx, v.By, registry.DecisionDenied)
 		return hook.Reject
 	case <-wait.Done():
 		// Dropped before anything else, so a decision arriving now is refused
 		// as unknown rather than applied to an action that will not run.
 		_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), id)
-		r.hooks.RecordApproval(v.By, registry.DecisionTimedOut)
+		r.hooks.RecordApproval(ctx, v.By, registry.DecisionTimedOut)
 		return hook.Abstain
 	}
 }
 
-// approvalID names an action awaiting approval.
-func approvalID() string {
+// newID names a run, or an action awaiting approval.
+func newID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
 
-// callTool runs tc and returns its scrubbed output and true, or bonyan's own
-// text for a call that produced none and false.
-func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, bool) {
+// toolFailed records that call gave the model no result, and why.
+func (r *run) toolFailed(ctx context.Context, call model.ToolCall, failure string) {
+	r.record(ctx, record.Event{Slot: record.SlotTool, Name: call.Name, Failure: failure})
+}
+
+// callTool runs tc and returns its scrubbed output, or bonyan's own text for a
+// call that produced none with the failure's kind.
+func (r *run) callTool(ctx context.Context, tc model.ToolCall) (string, string) {
 	if r.a.Tools == nil {
-		return resultUnknown, false
+		return resultUnknown, record.ToolUnknown
 	}
 	ctx, end := r.a.Telemetry.Tool(ctx, tc, r.a.Tools.Source(tc.Name), r.scrub.Scrub)
 	out, err := r.a.Tools.Call(ctx, tc)
 	end(r.scrub.Scrub(out), err)
 	switch {
 	case errors.Is(err, tool.ErrUnknown):
-		return resultUnknown, false
+		return resultUnknown, record.ToolUnknown
 	case errors.Is(err, tool.ErrInvalidArguments):
 		// A validation error names a schema path and a rule, never a value.
 		var ve *tool.ValidationError
 		if errors.As(err, &ve) {
-			return resultInvalid + ": " + ve.Error(), false
+			return resultInvalid + ": " + ve.Error(), record.ToolInvalid
 		}
-		return resultInvalid, false
+		return resultInvalid, record.ToolInvalid
 	case err != nil:
-		return resultFailed, false
+		return resultFailed, record.ToolFailed
 	}
-	return r.scrub.Scrub(out), true
+	return r.scrub.Scrub(out), ""
 }

@@ -162,19 +162,19 @@ func (g guardedPolicy) handle(ctx context.Context, items []trust.Item) trust.Han
 	switch {
 	case failure != "":
 		got = trust.Handling{Refuse: true}
-		g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionRefused, Failure: string(failure)})
+		g.rec.Event(ctx, record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionRefused, Failure: string(failure)})
 	case got.Refuse:
-		g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionRefused})
+		g.rec.Event(ctx, record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionRefused})
 	default:
 		if got.RequireApproval {
-			g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionApprovalNeeded})
+			g.rec.Event(ctx, record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionApprovalNeeded})
 		}
 		for _, i := range got.Drop {
 			ev := record.Event{Slot: SlotTrust, Name: g.name, Decision: DecisionDropped, Source: string(items[i].Source.Kind), Item: items[i].Source.ID}
 			if items[i].Source.Kind == content.KindMemory {
 				ev.Item = "" // a recording never holds a memory item's ID (ADR 0001 §4)
 			}
-			g.rec.Event(ev)
+			g.rec.Event(ctx, ev)
 		}
 	}
 	return got
@@ -196,7 +196,7 @@ func (g guardedPolicy) mark(ctx context.Context, s content.Section, nonce string
 		}
 		failure = FailNotAllowed
 	}
-	g.rec.Event(record.Event{Slot: SlotTrust, Name: g.name, Source: s.Label(), Decision: DecisionDefaultMarking, Failure: string(failure)})
+	g.rec.Event(ctx, record.Event{Slot: SlotTrust, Name: g.name, Source: s.Label(), Decision: DecisionDefaultMarking, Failure: string(failure)})
 	return compose(s, open, closing, header)
 }
 

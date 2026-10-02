@@ -321,10 +321,13 @@ func TestReadRefusesOtherFormats(t *testing.T) {
 	for _, in := range []string{
 		"",
 		`{"format":"something-else","version":1}`,
-		`{"format":"bonyan-recording","version":2}`,
+		`{"format":"bonyan-recording","version":0}`,
+		`{"format":"bonyan-recording","version":3}`,
 		"not json",
 	} {
 		_, _, err := record.Read(strings.NewReader(in))
+		require.Error(t, err, "%q", in)
+		_, _, err = record.ReadRuns(strings.NewReader(in))
 		require.Error(t, err, "%q", in)
 	}
 	_, _, err := record.Read(strings.NewReader(`{"format":"bonyan-recording","version":1}` + "\n{broken"))
@@ -334,7 +337,7 @@ func TestReadRefusesOtherFormats(t *testing.T) {
 func TestEventsAreRecordedAndSkippedOnReplay(t *testing.T) {
 	f := openFile(t, record.FileOptions{})
 	rec := newRecorder(t, f)
-	rec.Event(record.Event{Slot: "trust", Name: "default", Source: "user", Decision: "untrusted"})
+	rec.Event(context.Background(), record.Event{Slot: "trust", Name: "default", Source: "user", Decision: "untrusted"})
 	_, err := record.Chat(&scripted{steps: steps}, "main", rec).Chat(context.Background(), requests[0])
 	require.NoError(t, err)
 
@@ -544,4 +547,80 @@ func TestTrustedMemoryIsAbsentByDefault(t *testing.T) {
 	require.NoError(t, err)
 	_, _, raw = readFile(t, full)
 	assert.Contains(t, raw, "aisle seat", "a full recording keeps it")
+}
+
+// A version 1 recording, written on the main branch before version 2, is
+// read as one run with no ID and no end.
+func TestAVersion1RecordingIsReadAsOneRun(t *testing.T) {
+	raw, err := os.ReadFile("testdata/v1.jsonl")
+	require.NoError(t, err)
+
+	h, calls, err := record.Read(bytes.NewReader(raw))
+	require.NoError(t, err)
+	assert.Equal(t, 1, h.Version)
+	require.Len(t, calls, 3)
+	for i, c := range calls {
+		assert.Equal(t, int64(i+1), c.Seq)
+		assert.Equal(t, "main", c.Model)
+	}
+	assert.Equal(t, "open from nine", calls[2].Response.Content)
+
+	h, runs, err := record.ReadRuns(bytes.NewReader(raw))
+	require.NoError(t, err)
+	assert.Equal(t, 1, h.Version)
+	require.Len(t, runs, 1)
+	run := runs[0]
+	assert.Empty(t, run.ID)
+	assert.Empty(t, run.Agent)
+	assert.Nil(t, run.End, "a version 1 recording holds no outcome")
+	assert.Equal(t, calls, run.Calls)
+	require.Len(t, run.Events, 2)
+	for _, e := range run.Events {
+		assert.Equal(t, "trust", e.Slot)
+	}
+}
+
+// Every entry recorded inside a run names it, so interleaved runs come apart;
+// entries recorded outside any run are read together, with no ID.
+func TestEntriesAreGroupedByRun(t *testing.T) {
+	f := openFile(t, record.FileOptions{})
+	rec := newRecorder(t, f)
+	bg := context.Background()
+	a, b := record.WithRun(bg, "a"), record.WithRun(bg, "b")
+	chat := record.Chat(&scripted{steps: steps}, "main", rec)
+
+	rec.Event(bg, record.Event{Slot: "trust", Name: "outside"})
+	rec.Start(a, record.Start{Agent: "first"})
+	rec.Start(b, record.Start{Agent: "second"})
+	_, err := chat.Chat(a, requests[0])
+	require.NoError(t, err)
+	rec.Event(b, record.Event{Slot: record.SlotTool, Name: "calendar", Failure: record.ToolFailed})
+	_, err = chat.Chat(b, requests[1])
+	require.NoError(t, err)
+	rec.End(b, record.End{Outcome: record.OutcomeCleared, Steps: 1, Tokens: 58, Cost: 7})
+	rec.End(a, record.End{Outcome: "step_limit", Steps: 1, Tokens: 49})
+
+	h, _, raw := readFile(t, f)
+	assert.Equal(t, record.Version, h.Version)
+	_, runs, err := record.ReadRuns(strings.NewReader(raw))
+	require.NoError(t, err)
+	require.Len(t, runs, 3)
+
+	assert.Empty(t, runs[0].ID)
+	assert.Equal(t, []record.Event{{Slot: "trust", Name: "outside"}}, runs[0].Events)
+	assert.Nil(t, runs[0].End)
+
+	assert.Equal(t, "a", runs[1].ID)
+	assert.Equal(t, "first", runs[1].Agent)
+	require.Len(t, runs[1].Calls, 1)
+	assert.Equal(t, int64(1), runs[1].Calls[0].Seq)
+	assert.Empty(t, runs[1].Events)
+	assert.Equal(t, &record.End{Outcome: "step_limit", Steps: 1, Tokens: 49}, runs[1].End)
+
+	assert.Equal(t, "b", runs[2].ID)
+	assert.Equal(t, "second", runs[2].Agent)
+	require.Len(t, runs[2].Calls, 1)
+	assert.Equal(t, int64(2), runs[2].Calls[0].Seq)
+	assert.Equal(t, []record.Event{{Slot: record.SlotTool, Name: "calendar", Failure: record.ToolFailed}}, runs[2].Events)
+	assert.Equal(t, &record.End{Outcome: record.OutcomeCleared, Steps: 1, Tokens: 58, Cost: 7}, runs[2].End)
 }
