@@ -122,9 +122,9 @@ is applied is not a slot.
     back into a request (§4, §8) and recalled memory;
     a program can register further source kinds, and a policy can classify by any of them. Remote
     tool output is a source of its own so that a policy which trusts the program's own tools does
-    not trust every tool server along with them. Model output is a source of its own so that a
-    model's reply read back into a request is never taken for the user's message. Elsewhere in this ADR, "tool output" and "tool
-    result" include it;
+    not trust every tool server along with them. Elsewhere in this ADR, "tool output" and "tool
+    result" include remote tool output. Model output is a source of its own so that a model's reply
+    read back into a request is never taken for the user's message;
   - **marking:** how untrusted content is delimited and presented inside its section (the delimiter
     format, labels, an encoding of the text);
   - **handling:** what else happens when untrusted content is present, for example requiring
