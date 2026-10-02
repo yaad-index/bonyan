@@ -31,6 +31,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) memory.Backend) {
 		{"LayersAreSeparate", layersAreSeparate},
 		{"RecallHonoursTheLimit", recallHonoursTheLimit},
 		{"RecallFindsAFactByItsText", recallFindsAFactByItsText},
+		{"RecallMatchesAnyWord", recallMatchesAnyWord},
 		{"DeleteSubjectRemovesEventsAndFacts", deleteSubjectRemovesEventsAndFacts},
 		{"ReadsHonourTheCutoff", readsHonourTheCutoff},
 		{"DeleteBeforeRemovesOlderRecords", deleteBeforeRemovesOlderRecords},
@@ -154,6 +155,18 @@ func recallFindsAFactByItsText(t *testing.T, b memory.Backend) {
 	for _, r := range got {
 		assert.Equal(t, "ana", r.Subject)
 	}
+}
+
+// A fact holding any word of the query matches, so a question asked in
+// ordinary words finds the fact it is about.
+func recallMatchesAnyWord(t *testing.T, b memory.Backend) {
+	write(t, b,
+		fact("ana", "lives in a small town", start),
+		fact("ana", "prefers mail over calls", start.Add(time.Second)),
+	)
+	got, err := b.Recall(ctx, "ana", "how should we contact her, by mail?", 10, never)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"prefers mail over calls"}, texts(got))
 }
 
 func deleteSubjectRemovesEventsAndFacts(t *testing.T, b memory.Backend) {

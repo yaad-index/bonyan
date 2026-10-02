@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/yaad-index/bonyan/memory"
 )
@@ -47,27 +48,55 @@ func (b *Backend) History(_ context.Context, subject, session string, since time
 	return out, nil
 }
 
-// Recall returns the facts containing every word of query, ignoring case,
-// newest first.
+// Recall returns the facts holding any word of query, ignoring case, those
+// holding the most of its words first and then the newest; an empty query
+// returns the newest facts.
 func (b *Backend) Recall(_ context.Context, subject, query string, limit int, since time.Time) ([]memory.Record, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	words := strings.Fields(strings.ToLower(query))
-	var out []memory.Record
+	words := queryWords(query)
+	type scored struct {
+		r     memory.Record
+		score int
+	}
+	var found []scored
 	for _, r := range slices.Backward(b.records) {
-		if len(out) == limit {
-			break
-		}
 		if r.Layer != memory.LongTerm || r.Subject != subject || r.At.Before(since) {
 			continue
 		}
 		text := strings.ToLower(r.Text)
-		if !all(words, func(w string) bool { return strings.Contains(text, w) }) {
+		score := 0
+		for _, w := range words {
+			if strings.Contains(text, w) {
+				score++
+			}
+		}
+		if len(words) > 0 && score == 0 {
 			continue
 		}
-		out = append(out, r)
+		found = append(found, scored{r, score})
+	}
+	slices.SortStableFunc(found, func(a, b scored) int { return b.score - a.score })
+	out := make([]memory.Record, 0, min(limit, len(found)))
+	for _, f := range found[:min(limit, len(found))] {
+		out = append(out, f.r)
 	}
 	return out, nil
+}
+
+// queryWords are the distinct words of query, lower-cased, with what is not a
+// letter or digit trimmed from each end.
+func queryWords(query string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, w := range strings.Fields(strings.ToLower(query)) {
+		w = strings.TrimFunc(w, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+		if w != "" && !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // DeleteSubject deletes every record of subject.
@@ -84,13 +113,4 @@ func (b *Backend) DeleteBefore(_ context.Context, t time.Time) error {
 	defer b.mu.Unlock()
 	b.records = slices.DeleteFunc(b.records, func(r memory.Record) bool { return r.At.Before(t) })
 	return nil
-}
-
-func all(words []string, f func(string) bool) bool {
-	for _, w := range words {
-		if !f(w) {
-			return false
-		}
-	}
-	return true
 }

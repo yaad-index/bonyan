@@ -253,3 +253,34 @@ func TestThePolicyRunsOnEveryRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, p.asked, 4, "two writes and two reads")
 }
+
+// DeleteSubject deletes from the backend and from everything added with
+// OnDeleteSubject, tries each even when another fails, and names every one
+// that failed: it never reports a partial deletion as done.
+func TestDeleteSubjectReachesEveryDeleter(t *testing.T) {
+	s := newStore(t, inmem.New(), nil, &clock{start})
+	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "a fact"))
+	var called []string
+	s.OnDeleteSubject("first", func(_ context.Context, subject string) error {
+		called = append(called, "first:"+subject)
+		return errors.New("disk full")
+	})
+	s.OnDeleteSubject("second", func(_ context.Context, subject string) error {
+		called = append(called, "second:"+subject)
+		return nil
+	})
+	err := s.DeleteSubject(ctx, "ana")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "first")
+	assert.NotContains(t, err.Error(), "second")
+	assert.Equal(t, []string{"first:ana", "second:ana"}, called, "every deleter is tried")
+	got, rerr := s.Recall(ctx, "ana", "", 10)
+	require.NoError(t, rerr)
+	assert.Empty(t, got, "the backend's part is done all the same")
+
+	called = nil
+	s2 := newStore(t, inmem.New(), nil, &clock{start})
+	s2.OnDeleteSubject("only", func(context.Context, string) error { called = append(called, "only"); return nil })
+	require.NoError(t, s2.DeleteSubject(ctx, "ana"))
+	assert.Equal(t, []string{"only"}, called)
+}

@@ -97,9 +97,6 @@ func TestAQueryIsOnlyWords(t *testing.T) {
 	got, err := b.Recall(ctx, "ana", `NEAR( "quoted"`, 10, time.Time{})
 	require.NoError(t, err)
 	assert.Len(t, got, 1, "the words match as words")
-	got, err = b.Recall(ctx, "ana", `here OR absent`, 10, time.Time{})
-	require.NoError(t, err)
-	assert.Empty(t, got, "OR is a word to match, not an operator")
 }
 
 // The database and its write-ahead log are readable by their owner only.

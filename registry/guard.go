@@ -136,7 +136,7 @@ func (g guardedHook) run(ctx context.Context, ev hook.Event) (hook.Event, bool, 
 		}
 		return ev, false, true
 	}
-	if act.Text == nil && act.Arguments == nil && act.Messages == nil {
+	if act.Text == nil && act.Arguments == nil && act.Messages == nil && act.Memory == nil {
 		return ev, false, false
 	}
 	next, ok := g.apply(ev, act)
@@ -153,7 +153,7 @@ func (g guardedHook) run(ctx context.Context, ev hook.Event) (hook.Event, bool, 
 // point Rights gives a change to.
 func (g guardedHook) apply(ev hook.Event, act hook.Action) (hook.Event, bool) {
 	set := 0
-	for _, b := range []bool{act.Text != nil, act.Arguments != nil, act.Messages != nil} {
+	for _, b := range []bool{act.Text != nil, act.Arguments != nil, act.Messages != nil, act.Memory != nil} {
 		if b {
 			set++
 		}
@@ -162,8 +162,14 @@ func (g guardedHook) apply(ev hook.Event, act hook.Action) (hook.Event, bool) {
 		return ev, false
 	}
 	switch {
-	case act.Text != nil && ev.Point == hook.UserMessage:
+	case act.Text != nil && (ev.Point == hook.UserMessage || ev.Point == hook.MemoryWrite):
 		ev.Message = content.From(ev.Message.Provenance(), g.scrub.Scrub(*act.Text))
+	case act.Memory != nil && ev.Point == hook.MemoryRecall:
+		kept, ok := keepRecalled(ev.Memory, act.Memory, g.scrub)
+		if !ok {
+			return ev, false
+		}
+		ev.Memory = kept
 	case act.Text != nil && ev.Point == hook.AfterTool:
 		ev.Result = content.From(ev.Result.Provenance(), g.scrub.Scrub(*act.Text))
 	case act.Text != nil && ev.Point == hook.Reply:
@@ -252,6 +258,58 @@ func keepTrust(original, changed []model.Message, scrub *secret.Scrubber) ([]mod
 		out[i] = m
 	}
 	return out, true
+}
+
+// keepRecalled checks a hook's change to what was recalled: every item must be
+// one that was recalled, matched by its provenance, and each at most once, so
+// a hook can leave items out or redact them but never add one. An item the
+// hook left as it was keeps its type; a changed one is untrusted, with the
+// provenance of what it replaced, and scrubbed.
+func keepRecalled(original, changed []content.Text, scrub *secret.Scrubber) ([]content.Text, bool) {
+	byProv := map[content.Provenance]content.Text{}
+	for _, t := range original {
+		if p, ok := provenanceOf(t); ok {
+			byProv[p] = t
+		}
+	}
+	out := make([]content.Text, 0, len(changed))
+	for _, t := range changed {
+		p, ok := provenanceOf(t)
+		if !ok {
+			return nil, false
+		}
+		orig, ok := byProv[p]
+		if !ok {
+			return nil, false
+		}
+		delete(byProv, p)
+		if t == orig {
+			out = append(out, orig)
+			continue
+		}
+		out = append(out, content.From(p, scrub.Scrub(textOf(t))))
+	}
+	return out, true
+}
+
+func provenanceOf(t content.Text) (content.Provenance, bool) {
+	switch v := t.(type) {
+	case content.Untrusted:
+		return v.Provenance(), true
+	case content.Trusted:
+		return v.Provenance(), v.Provenance() != content.Provenance{}
+	}
+	return content.Provenance{}, false
+}
+
+func textOf(t content.Text) string {
+	switch v := t.(type) {
+	case content.Untrusted:
+		return v.Raw()
+	case content.Trusted:
+		return v.String()
+	}
+	return ""
 }
 
 func (g guardedHook) event(p hook.Point, decision string, failure Failure) {

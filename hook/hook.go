@@ -13,9 +13,6 @@ import (
 	"github.com/yaad-index/bonyan/model"
 )
 
-// TODO(phase 12a, memory): the payloads of the memory points. Nothing calls
-// them before then.
-
 // Point is a place in a run where hooks are called.
 type Point string
 
@@ -57,8 +54,11 @@ func (p Point) Valid() bool {
 // every resolved secret removed (ADR 0001 §10).
 type Event struct {
 	Point Point
-	// Message is the user message, at UserMessage.
+	// Message is the user message, at UserMessage, and the text about to be
+	// stored, at MemoryWrite.
 	Message content.Untrusted
+	// Memory is what was recalled, at MemoryRecall.
+	Memory []content.Text
 	// Messages are the request's messages, at BeforeModel.
 	Messages []model.Message
 	// Response is the model's response, at AfterModel.
@@ -149,6 +149,11 @@ type Action struct {
 	// must be one the request already held, and an untrusted part must carry a
 	// provenance the request already held.
 	Messages []model.Message
+	// Memory replaces what was recalled (MemoryRecall). Each item must be one
+	// that was recalled, at most once, so a hook can leave items out or redact
+	// them but never add one; a changed item keeps its provenance and is
+	// untrusted.
+	Memory []content.Text
 }
 
 // Right is what a hook may do at a point beyond observing.
@@ -163,7 +168,7 @@ const (
 // Rights returns what a hook may do at p beyond observing (ADR 0001 §12).
 func Rights(p Point) Right {
 	switch p {
-	case UserMessage, BeforeModel, BeforeTool, Reply:
+	case UserMessage, BeforeModel, BeforeTool, Reply, MemoryWrite, MemoryRecall:
 		return Change | Deny
 	case AfterTool:
 		return Change
