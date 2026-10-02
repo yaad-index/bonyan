@@ -480,14 +480,16 @@ func (r *run) looping(tc model.ToolCall) bool {
 	if r.threshold < 0 {
 		return false
 	}
-	key := callKey(tc)
+	key := CallKey(tc)
 	r.seen[key]++
 	return r.seen[key] >= r.threshold
 }
 
-// callKey identifies a tool call by name and arguments, with the arguments'
+// CallKey identifies a tool call by name and arguments, with the arguments'
 // JSON in a canonical form so that key order and spacing do not hide a repeat.
-func callKey(tc model.ToolCall) string {
+// Two calls with the same key are the same call, as inline loop detection
+// counts them.
+func CallKey(tc model.ToolCall) string {
 	args := []byte(tc.Arguments)
 	var v any
 	if json.Unmarshal(tc.Arguments, &v) == nil {
