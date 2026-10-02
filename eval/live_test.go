@@ -2,6 +2,7 @@ package eval_test
 
 import (
 	"context"
+	"os"
 	"slices"
 	"testing"
 	"time"
@@ -208,4 +209,30 @@ func TestARunWithNoSubjectIsNotQueued(t *testing.T) {
 	_, _, err := agent.Run(context.Background(), l.agent, input("x"))
 	require.NoError(t, err)
 	assert.Zero(t, l.queue.Len())
+}
+
+// The worker scores only the run an item names, even when the item's
+// recording holds another.
+func TestTheWorkerScoresOnlyTheItemsRun(t *testing.T) {
+	f, err := record.OpenFile(record.FileOptions{Dir: t.TempDir()})
+	require.NoError(t, err)
+	rec, err := record.NewRecorder(f, secret.NewScrubber())
+	require.NoError(t, err)
+	for _, id := range []string{"x", "y"} {
+		ctx := record.WithRun(context.Background(), id)
+		rec.Start(ctx, record.Start{Agent: id})
+		rec.End(ctx, record.End{Outcome: record.OutcomeCleared, Steps: 1})
+	}
+	require.NoError(t, f.Close())
+	raw, err := os.ReadFile(f.Path())
+	require.NoError(t, err)
+
+	q, err := record.NewMemQueue(time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, q.Put(context.Background(), record.Item{Run: "y", Subject: "ana", At: time.Now(), Recording: raw}))
+	got, err := eval.Worker{Queue: q, Evaluators: []score.Evaluator{eval.Outcome{}}}.Drain(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "y", got[0].Run)
+	assert.Equal(t, "y", got[0].Agent)
 }
