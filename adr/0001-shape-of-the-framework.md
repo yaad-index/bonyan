@@ -425,10 +425,18 @@ attached in code.
     The action runs only when a hook approves it and none denies it. A denial is reported to the
     model as a denied call, as before a tool call. When every hook has answered and none approved,
     denied or said pending (they abstained, or only observing hooks are attached), the action is
-    cancelled at once; a pending answer keeps it waiting until a decision or the approval timeout,
-    which cancels it. A cancelled action is not cleared for a gate-type agent (§7). Every outcome is
-    recorded: approved, denied, failed or timed out with the hook that decided it, or cancelled
-    because no hook decided, with no hook named.
+    cancelled at once; a pending answer keeps it waiting. Each hook that answered pending decides
+    later on its own, through the approval store and under its own name, and the store keeps a
+    decision per hook. The action waits until every one of them has decided, or until the approval
+    timeout, which cancels it and records each hook that had not decided. The first later denial
+    ends the wait at once. The action runs only when none denied and at least one approved, at the
+    point or later. A later decision under the name of a hook that did not answer pending on that
+    action is refused as unknown. A run resumed after a restart (§7) keeps the decisions already
+    made. bonyan records the name a decision is given under; who may decide under a name, and
+    authenticating whoever submits a decision, are the program's, since without that one caller
+    could decide as every approver. A cancelled action is not cleared for a gate-type agent (§7).
+    Every outcome is recorded: approved, denied, failed or timed out with the hook that decided it,
+    or cancelled because no hook decided, with no hook named.
 
   A run ended by a denial is, for a gate-type agent, one more not-cleared case (§7).
 - **Several hooks at one point** run in their configured order. Each sees the payload as the hook
@@ -533,3 +541,8 @@ attached in code.
   history, or with the pending action's tool gone, is refused; the approval timeout still counts
   from when the action was held; saved state carries its subject, has a retention period and is
   deleted with the subject's data.
+- §12: each hook that answered pending at the approval point decides later on its own, under its
+  own name, and the store keeps a decision per hook; the action waits for all of them or the
+  timeout, the first later denial ends the wait, it runs only when none denied and one approved, a
+  decision under a name that did not answer pending is unknown, a resumed run keeps the decisions
+  made, and authenticating who decides under a name is the program's.
