@@ -122,9 +122,12 @@ is applied is not a slot.
     back into a request (§4, §8) and recalled memory;
     a program can register further source kinds, and a policy can classify by any of them. Remote
     tool output is a source of its own so that a policy which trusts the program's own tools does
-    not trust every tool server along with them. Elsewhere in this ADR, "tool output" and "tool
-    result" include remote tool output. Model output is a source of its own so that a model's reply
-    read back into a request is never taken for the user's message;
+    not trust every tool server along with them. Its source also names the tool server it came
+    from, so a policy can trust one server and not another; the name is the one the program
+    registered the server under, never one the server reports about itself. Elsewhere in this
+    ADR, "tool output" and "tool result" include remote tool output. Model output is a source of
+    its own so that a model's reply read back into a request is never taken for the user's
+    message;
   - **marking:** how untrusted content is delimited and presented inside its section (the delimiter
     format, labels, an encoding of the text);
   - **handling:** what else happens when untrusted content is present, for example requiring
@@ -140,8 +143,8 @@ is applied is not a slot.
   or registered implementation can send a request around it.
 - **A policy failure fails closed.** A policy that errors, panics, exceeds the run's deadline or
   returns no decision leaves the content untrusted, marked as the default policy marks it.
-- **Every decision is recorded** in the trace and the recording: the source kind, the decision and
-  the policy's name, never the content (§9).
+- **Every decision is recorded** in the trace and the recording: the source kind (with the server's
+  name for remote tool output), the decision and the policy's name, never the content (§9).
 - **The default policy** classifies everything that did not come from the program or the operator
   (user messages, uploads, fetched material, tool output, remote tool output, model output read
   back into a request, memory extracted from any of those) as
@@ -190,9 +193,10 @@ Two other positions were considered and rejected:
   to each backend, so a fact planted by a fetched item cannot come back later as trusted context.
   The recorded source names the kind of material the fact was extracted from, remote tool output
   included, so a fact from a tool server is classified again as remote tool output and never as the
-  program's own tool output. Model output is a kind of its own in the same way: a fact extracted from
-  a model's reply keeps model output as its source, so it is classified again as model output and
-  never as the user's message or as material the program supplied.
+  program's own tool output; for remote tool output it also keeps the server's name, so the fact is
+  classified again under the server it came from. Model output is a kind of its own in the same
+  way: a fact extracted from a model's reply keeps model output as its source, so it is classified
+  again as model output and never as the user's message or as material the program supplied.
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
   and its source; a retention period is configurable; deletion by subject is **required to
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
@@ -210,8 +214,9 @@ Two other positions were considered and rejected:
 - A tool registry with typed inputs and outputs (JSON Schema derived from Go types).
 - An **MCP client**, so tools served over the Model Context Protocol are registered the same way as
   in-process tools, except in what the server controls:
-  - their results are remote tool output (§3), not tool output. An error result is the server's
-    output like any other and enters the same way;
+  - their results are remote tool output (§3), not tool output, and their source names the server
+    by the name the program registered it under. An error result is the server's output like any
+    other and enters the same way;
   - text the server writes into a tool's definition reaches the model in instruction position,
     outside any marked section. By default bonyan keeps only what a call needs to be valid, at every
     level of the definition, and drops the rest: the tool's description, and in each schema every
@@ -500,3 +505,7 @@ attached in code.
 - §3, §4, §8: model output read back into a request (an answer an evaluator judges, a reply kept in
   session history) is a source of its own, untrusted under the default policy and kept as a recalled
   fact's source.
+- §3, §4, §5: the source of remote tool output names the tool server, by the name the program
+  registered it under and never one the server reports, so a policy can trust one server and not
+  another; the name is recorded with each decision, and a recalled fact extracted from it keeps the
+  name with its source.
