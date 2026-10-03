@@ -31,7 +31,7 @@ package requires another beyond what is stated here.
 
 **Everything is pluggable and switchable by configuration.** Not only what touches a vendor, a store
 or the network: models, memory backends, context-pipeline stages, tools, secret sources, the trust policy (§3),
-hooks (§12), the approval store, recorders, eval scorers and telemetry exporters each sit behind an
+hooks (§12), the approval store, the run store (§7), recorders, eval scorers and telemetry exporters each sit behind an
 interface, and every
 implementation registers under a name. An agent is assembled from configuration that names the
 implementation for each slot, so swapping one (another model provider, another memory backend,
@@ -202,7 +202,9 @@ Two other positions were considered and rejected:
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
   verify the deletion happened). A **conformance test suite** in bonyan that every backend must pass (write,
   recall, delete by subject, assert absent, including extracted facts) proves a backend *implements*
-  deletion; it does not prove that a given deletion on a live external store happened.
+  deletion; it does not prove that a given deletion on a live external store happened. A suspended
+  run's saved state (§7) follows the same rules: it carries its subject, holds no recalled memory,
+  has a retention period, and deleting a subject deletes it.
 - **Memory in logs, traces and recordings:** by default memory contents never appear in bonyan's own
   logs or traces (§9; a program's own logging is outside bonyan's reach), and recordings (§8) exclude recalled-memory sections. **Trace content capture (§9) always
   excludes memory sections**, because exported spans leave for a trace backend bonyan cannot delete
@@ -247,8 +249,24 @@ Two other positions were considered and rejected:
   needing approval; the loop suspends it and emits it to a configured approver through the approval
   hook point (§12), and resumes or cancels on the decision. Suspended actions are
   kept in a pluggable store so they survive a restart; with no durable store configured, a restart
-  cancels every pending action (fail-closed), it never drops one silently. An approval that arrives for an action
-  the loop no longer holds (cancelled by a restart or a timeout) is rejected as unknown, never applied.
+  cancels every pending action (fail-closed), it never drops one silently.
+  **A run survives a restart with its action.** When a run suspends, its own state is saved in a
+  pluggable run store: this run's turns, its steps, spend and loop counts, whether the trust
+  policy's handling has required approval, and the pending action with the time its approval
+  timeout ends. Recalled memory is never saved: a resumed run recalls again under the policy as it
+  is then. Every saved part keeps its provenance and is classified again on resume under the policy
+  as it is then, as recalled memory is. Saved turns are scrubbed like everything bonyan stores
+  (§10), so a resumed run sees the redaction placeholders where secrets were, and a tool that needs
+  a secret resolves it again from the secret store, never from the saved state. The program resumes
+  a run by its identifier with the same configuration: the hashes of the instructions, the tool
+  definitions, the material and the history the run started with are saved, and a resume where any
+  of them differs, or where the pending action's tool is gone, is refused (fail-closed), so a
+  decision asked for under one configuration never continues under another. A resumed run keeps
+  its identifier in recordings and traces, and its approval timeout still counts from when the
+  action was held, so a restart past it cancels the action. Saved state carries the run's subject,
+  has a retention period, and is deleted with the subject's data (§4). An approval that arrives
+  for an action the loop no longer holds (cancelled by a restart or a timeout) is rejected as
+  unknown, never applied.
 - **Fail-closed mode** for gate-type agents: every non-answer is "not cleared", never "cleared by
   default". **"Not cleared" is its own result value, distinct from an error**, so a caller that handles
   errors and verdicts separately cannot read a failure as a pass by forgetting a branch. Non-answers include a failed model or classifier call, structured output still invalid
@@ -509,3 +527,9 @@ attached in code.
   registered it under and never one the server reports, so a policy can trust one server and not
   another; the name is recorded with each decision, and a recalled fact extracted from it keeps the
   name with its source.
+- §7, §4: a run suspended on a pending approval survives a restart: its own state is saved in a
+  pluggable run store without recalled memory, scrubbed, each part keeping its provenance and
+  classified again on resume; a resume under different instructions, tool definitions, material or
+  history, or with the pending action's tool gone, is refused; the approval timeout still counts
+  from when the action was held; saved state carries its subject, has a retention period and is
+  deleted with the subject's data.
