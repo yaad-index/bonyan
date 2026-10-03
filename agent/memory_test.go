@@ -15,6 +15,7 @@ import (
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
 	"github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -273,4 +274,26 @@ func TestAChangedTrustedRecallIsUntrusted(t *testing.T) {
 	_, _, err = agent.Run(context.Background(), a, input("mail"))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"prefers [redacted]"}, recalledIn(m.reqs[0]), "untrusted, inside the section")
+}
+
+// The user's message and the answer reach memory with every resolved secret
+// scrubbed, as the hooks see them.
+func TestStoredEventsHoldNoSecret(t *testing.T) {
+	res := secret.NewResolver(source{"key": "SECRET-5e1"})
+	_, err := res.Scope("key").Resolve(context.Background(), "key")
+	require.NoError(t, err)
+	a, m, store := withMemory(t)
+	m.steps = stepsOf(answer("your key is SECRET-5e1"))
+	a.Scrubber = res.Scrubber()
+	out, _, err := agent.Run(context.Background(), a, input("my key is SECRET-5e1"))
+	require.NoError(t, err)
+	require.True(t, out.Cleared(), out.String())
+	events, err := store.History(context.Background(), "ana", "s1")
+	require.NoError(t, err)
+	require.Len(t, events, 2, "the message and the answer")
+	for _, e := range events {
+		raw := e.(content.Untrusted).Raw()
+		assert.NotContains(t, raw, "SECRET-5e1")
+		assert.Contains(t, raw, "key is", "stored, with the secret scrubbed out")
+	}
 }
