@@ -87,7 +87,7 @@ func TestARunStorePurgesWhatRetentionExpired(t *testing.T) {
 // Deleting a subject from memory deletes the subject's saved runs.
 func TestDeletingASubjectDeletesItsSavedRuns(t *testing.T) {
 	cfg := storesConfig(registry.SlotConfig{Impl: registry.ApprovalsInMem}, registry.SlotConfig{Impl: registry.RunStoreInMem}, "720h")
-	cfg.Memory = &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"}
+	cfg.Memory = &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Namespace: "test", Retention: "720h"}
 	c, err := newRegistry(t).Assemble(cfg)
 	require.NoError(t, err)
 	ctx := context.Background()

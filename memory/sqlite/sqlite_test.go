@@ -24,7 +24,7 @@ var (
 
 func open(t *testing.T, path string) *Backend {
 	t.Helper()
-	b, err := Open(path)
+	b, err := Open(path, "test")
 	require.NoError(t, err)
 	return b
 }
@@ -204,23 +204,16 @@ func TestTheLogCheckpointRestoresTheConnectionsWait(t *testing.T) {
 	assert.Equal(t, 5000, wait)
 }
 
-// trustDocs trusts memory extracted from the tool server named docs.
-type trustDocs struct{}
-
-func (trustDocs) Classify(_ context.Context, src content.Provenance) (trust.Decision, error) {
-	if src.Kind == content.KindMemory && src.Origin == content.KindRemoteTool && src.Server == "docs" {
-		return trust.Decision{Verdict: trust.Trusted}, nil
-	}
-	return trust.Decision{Verdict: trust.Untrusted}, nil
-}
-
-// A database made before records named their server opens with the column
-// added. Its records have no server, so a policy trusting a named server does
-// not trust them; new records keep theirs, and opening again changes nothing.
-func TestADatabaseFromBeforeServersOpens(t *testing.T) {
+// A database made before records named their server, or had namespaces,
+// opens with both columns added. Its records have no server, so a policy
+// trusting a named server does not trust them, and they are in the empty
+// namespace, where a backend opened with another namespace never sees them.
+// New records keep their server, and opening again changes nothing.
+func TestADatabaseFromBeforeServersAndNamespacesOpens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	old := strings.Replace(schema, "\tserver  TEXT    NOT NULL DEFAULT '',\n", "", 1)
 	require.NotEqual(t, schema, old, "the old schema has no server column")
+	require.NotContains(t, old, "namespace", "nor a namespace column")
 	db, err := sql.Open("sqlite", "file:"+path)
 	require.NoError(t, err)
 	_, err = db.Exec(old)
@@ -232,10 +225,10 @@ func TestADatabaseFromBeforeServersOpens(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	for range 2 {
-		b := open(t, path)
-		s, err := memory.NewStore(b, memory.Options{Policy: trustDocs{}, Retention: 24 * 365 * 100 * time.Hour, Now: func() time.Time { return start }})
+		b, err := Open(path, "")
 		require.NoError(t, err)
-		require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindRemoteTool, Server: "docs"}, "from docs"))
+		_, err = b.Write(ctx, memory.Record{Layer: memory.LongTerm, Subject: "ana", Origin: content.KindRemoteTool, Server: "docs", Text: "from docs", At: start})
+		require.NoError(t, err)
 		got, err := b.Recall(ctx, "ana", "", 10, time.Time{})
 		require.NoError(t, err)
 		servers := map[string]string{}
@@ -244,14 +237,13 @@ func TestADatabaseFromBeforeServersOpens(t *testing.T) {
 		}
 		assert.Equal(t, "", servers["from before"])
 		assert.Equal(t, "docs", servers["from docs"])
-		recalled, err := s.Recall(ctx, "ana", "before", 10)
-		require.NoError(t, err)
-		require.Len(t, recalled, 1)
-		assert.False(t, recalled[0].Trusted(), "no server, not trusted as docs")
-		recalled, err = s.Recall(ctx, "ana", "docs", 10)
-		require.NoError(t, err)
-		require.NotEmpty(t, recalled)
-		assert.True(t, recalled[0].Trusted())
 		require.NoError(t, b.Close())
+
+		other, err := Open(path, "test")
+		require.NoError(t, err)
+		got, err = other.Recall(ctx, "ana", "before", 10, time.Time{})
+		require.NoError(t, err)
+		assert.Empty(t, got, "the old records are in the empty namespace")
+		require.NoError(t, other.Close())
 	}
 }

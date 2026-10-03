@@ -21,7 +21,7 @@ import (
 
 func memoryStore(t *testing.T, facts ...string) *memory.Store {
 	t.Helper()
-	s, err := memory.NewStore(inmem.New(), memory.Options{Retention: 24 * time.Hour})
+	s, err := memory.NewStore(inmem.New("test"), memory.Options{Namespace: "test", Retention: 24 * time.Hour})
 	require.NoError(t, err)
 	for _, f := range facts {
 		require.NoError(t, s.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, f))
@@ -260,7 +260,7 @@ func (trustMemory) Classify(context.Context, content.Provenance) (trust.Decision
 // A hook that changes a trusted recalled item gets back untrusted memory,
 // even if it hands the change back as trusted: a change never raises trust.
 func TestAChangedTrustedRecallIsUntrusted(t *testing.T) {
-	store, err := memory.NewStore(inmem.New(), memory.Options{Policy: trustMemory{}, PolicyName: "all", Retention: time.Hour})
+	store, err := memory.NewStore(inmem.New("test"), memory.Options{Namespace: "test", Policy: trustMemory{}, PolicyName: "all", Retention: time.Hour})
 	require.NoError(t, err)
 	require.NoError(t, store.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 	m := &scripted{steps: stepsOf(answer("done"))}

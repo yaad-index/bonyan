@@ -47,7 +47,7 @@ func (c *clock) now() time.Time { return c.t }
 
 func newStore(t *testing.T, b memory.Backend, p trust.Policy, c *clock) *memory.Store {
 	t.Helper()
-	s, err := memory.NewStore(b, memory.Options{Policy: p, PolicyName: "program", Retention: 24 * time.Hour, Now: c.now})
+	s, err := memory.NewStore(b, memory.Options{Namespace: "test", Policy: p, PolicyName: "program", Retention: 24 * time.Hour, Now: c.now})
 	require.NoError(t, err)
 	return s
 }
@@ -68,7 +68,7 @@ func TestTheStricterDecisionWins(t *testing.T) {
 	} {
 		t.Run(tc.stored.String()+" then "+tc.now.String(), func(t *testing.T) {
 			p := &policy{}
-			s := newStore(t, inmem.New(), p, &clock{start})
+			s := newStore(t, inmem.New("test"), p, &clock{start})
 			p.set(tc.stored, nil)
 			require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 			require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "hello"))
@@ -103,7 +103,7 @@ func TestAFailingPolicyIsUntrusted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &policy{}
-			s := newStore(t, inmem.New(), p, &clock{start})
+			s := newStore(t, inmem.New("test"), p, &clock{start})
 			p.set(tc.storeVerdict, tc.storeErr)
 			require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 			p.set(tc.readOK, tc.readErr)
@@ -118,12 +118,12 @@ func TestAFailingPolicyIsUntrusted(t *testing.T) {
 // The decision a record is stored under is the Store's own, from the policy,
 // with the policy's name; a caller has no way to supply one.
 func TestTheStoredDecisionIsTheStores(t *testing.T) {
-	b := inmem.New()
+	b := inmem.New("test")
 	p := &policy{verdict: trust.Trusted}
 	s := newStore(t, b, p, &clock{start})
 	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindFetched}, "lives in a small town"))
 
-	recs, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	recs, err := b.Recall(ctx, "test/ana", "", 10, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, recs, 1)
 	assert.Equal(t, memory.Decision{Verdict: trust.Trusted, Policy: "program"}, recs[0].Decision)
@@ -135,7 +135,7 @@ func TestTheStoredDecisionIsTheStores(t *testing.T) {
 
 // Untrusted memory comes back as memory, with the kind it came from.
 func TestUntrustedMemoryKeepsItsOrigin(t *testing.T) {
-	s := newStore(t, inmem.New(), nil, &clock{start})
+	s := newStore(t, inmem.New("test"), nil, &clock{start})
 	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindTool}, "prefers mail"))
 	got, err := s.Recall(ctx, "ana", "", 10)
 	require.NoError(t, err)
@@ -150,6 +150,8 @@ func TestUntrustedMemoryKeepsItsOrigin(t *testing.T) {
 // careless returns every record it holds, ignoring the layer, subject, session
 // and cutoff, as a faulty backend might.
 type careless struct{ recs []memory.Record }
+
+func (*careless) Namespace() string { return "test" }
 
 func (c *careless) Write(_ context.Context, r memory.Record) (string, error) {
 	c.recs = append(c.recs, r)
@@ -195,7 +197,7 @@ func TestTheStoreHonoursRetentionAndSubjectOnRead(t *testing.T) {
 // Purge deletes what is older than the retention period from the backend.
 func TestPurgeDeletesWhatRetentionExpired(t *testing.T) {
 	c := &clock{start}
-	b := inmem.New()
+	b := inmem.New("test")
 	s := newStore(t, b, nil, c)
 	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "old"))
 	c.t = start.Add(23 * time.Hour)
@@ -203,14 +205,14 @@ func TestPurgeDeletesWhatRetentionExpired(t *testing.T) {
 	c.t = start.Add(25 * time.Hour)
 	require.NoError(t, s.Purge(ctx))
 
-	recs, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	recs, err := b.Recall(ctx, "test/ana", "", 10, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, recs, 1, "read with no cutoff, so only the purge explains the absence")
 	assert.Equal(t, "recent", recs[0].Text)
 }
 
 func TestDeleteSubject(t *testing.T) {
-	s := newStore(t, inmem.New(), nil, &clock{start})
+	s := newStore(t, inmem.New("test"), nil, &clock{start})
 	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "a fact"))
 	require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "an event"))
 	require.NoError(t, s.DeleteSubject(ctx, "ana"))
@@ -223,12 +225,12 @@ func TestDeleteSubject(t *testing.T) {
 }
 
 func TestInvalidCalls(t *testing.T) {
-	_, err := memory.NewStore(inmem.New(), memory.Options{})
+	_, err := memory.NewStore(inmem.New("test"), memory.Options{Namespace: "test"})
 	require.ErrorIs(t, err, memory.ErrInvalid, "no retention")
-	_, err = memory.NewStore(nil, memory.Options{Retention: time.Hour})
+	_, err = memory.NewStore(nil, memory.Options{Namespace: "test", Retention: time.Hour})
 	require.ErrorIs(t, err, memory.ErrInvalid, "no backend")
 
-	s := newStore(t, inmem.New(), nil, &clock{start})
+	s := newStore(t, inmem.New("test"), nil, &clock{start})
 	for name, err := range map[string]error{
 		"empty subject":  s.Remember(ctx, "", content.Provenance{Kind: content.KindUser}, "x"),
 		"empty origin":   s.Remember(ctx, "ana", content.Provenance{Kind: ""}, "x"),
@@ -245,7 +247,7 @@ func TestInvalidCalls(t *testing.T) {
 // even when the stored one already settles the answer.
 func TestThePolicyRunsOnEveryRead(t *testing.T) {
 	p := &policy{verdict: trust.Untrusted}
-	s := newStore(t, inmem.New(), p, &clock{start})
+	s := newStore(t, inmem.New("test"), p, &clock{start})
 	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 	require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "hello"))
 	_, err := s.Recall(ctx, "ana", "", 10)
@@ -259,7 +261,7 @@ func TestThePolicyRunsOnEveryRead(t *testing.T) {
 // OnDeleteSubject, tries each even when another fails, and names every one
 // that failed: it never reports a partial deletion as done.
 func TestDeleteSubjectReachesEveryDeleter(t *testing.T) {
-	s := newStore(t, inmem.New(), nil, &clock{start})
+	s := newStore(t, inmem.New("test"), nil, &clock{start})
 	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "a fact"))
 	var called []string
 	s.OnDeleteSubject("first", func(_ context.Context, subject string) error {
@@ -280,7 +282,7 @@ func TestDeleteSubjectReachesEveryDeleter(t *testing.T) {
 	assert.Empty(t, got, "the backend's part is done all the same")
 
 	called = nil
-	s2 := newStore(t, inmem.New(), nil, &clock{start})
+	s2 := newStore(t, inmem.New("test"), nil, &clock{start})
 	s2.OnDeleteSubject("only", func(context.Context, string) error { called = append(called, "only"); return nil })
 	require.NoError(t, s2.DeleteSubject(ctx, "ana"))
 	assert.Equal(t, []string{"only"}, called)
@@ -309,7 +311,7 @@ func TestARecalledFactKeepsItsServer(t *testing.T) {
 		{trustServer("web"), false},
 		{trustOrigin(content.KindTool), false},
 	} {
-		s := newStore(t, inmem.New(), tc.policy, &clock{t: start})
+		s := newStore(t, inmem.New("test"), tc.policy, &clock{t: start})
 		require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindRemoteTool, Server: "docs", ID: "c1"}, "the docs say so"))
 		got, err := s.Recall(ctx, "ana", "", 10)
 		require.NoError(t, err)
@@ -329,7 +331,7 @@ func TestARecalledFactKeepsItsServer(t *testing.T) {
 
 // Only remote tool output has a server.
 func TestAServerNeedsRemoteToolOutput(t *testing.T) {
-	s := newStore(t, inmem.New(), nil, &clock{t: start})
+	s := newStore(t, inmem.New("test"), nil, &clock{t: start})
 	require.ErrorIs(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindTool, Server: "docs"}, "x"), memory.ErrInvalid)
 	require.ErrorIs(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser, Server: "docs"}, "x"), memory.ErrInvalid)
 }
@@ -361,16 +363,16 @@ func TestEveryWriteIsScrubbed(t *testing.T) {
 	res := secret.NewResolver(oneSecret{"key", "SECRET-a71"})
 	_, err := res.Scope("key").Resolve(ctx, "key")
 	require.NoError(t, err)
-	b := inmem.New()
-	s, err := memory.NewStore(b, memory.Options{Retention: time.Hour, Scrubber: res.Scrubber()})
+	b := inmem.New("test")
+	s, err := memory.NewStore(b, memory.Options{Namespace: "test", Retention: time.Hour, Scrubber: res.Scrubber()})
 	require.NoError(t, err)
 	user := content.Provenance{Kind: content.KindUser}
 	require.NoError(t, s.Append(ctx, "ana", "s1", user, "my key is SECRET-a71"))
 	require.NoError(t, s.Remember(ctx, "ana", user, "her key is SECRET-a71"))
 
-	events, err := b.History(ctx, "ana", "s1", time.Time{})
+	events, err := b.History(ctx, "test/ana", "s1", time.Time{})
 	require.NoError(t, err)
-	facts, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	facts, err := b.Recall(ctx, "test/ana", "", 10, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	require.Len(t, facts, 1)
@@ -378,4 +380,65 @@ func TestEveryWriteIsScrubbed(t *testing.T) {
 		assert.NotContains(t, r.Text, "SECRET-a71", "as the backend holds it")
 		assert.Contains(t, r.Text, "key is")
 	}
+}
+
+// A Store needs a namespace, and the backend's own.
+func TestAStoreNeedsTheBackendsNamespace(t *testing.T) {
+	_, err := memory.NewStore(inmem.New(""), memory.Options{Retention: time.Hour})
+	require.ErrorIs(t, err, memory.ErrInvalid, "no namespace")
+	_, err = memory.NewStore(inmem.New("b"), memory.Options{Namespace: "a", Retention: time.Hour})
+	require.ErrorIs(t, err, memory.ErrInvalid, "another namespace")
+}
+
+// blind is a backend that ignores namespaces: every one opened over the same
+// records reports whatever namespace it is asked for and reads them all.
+type blind struct {
+	*inmem.Backend
+	ns string
+}
+
+func (b blind) Namespace() string { return b.ns }
+
+// The Store keeps namespaces apart itself, not only through the backend: over
+// a backend that ignores them, two Stores whose namespace and subject would
+// spell the same key unescaped still see only their own records and delete
+// only their own.
+func TestTheStoreKeepsNamespacesApartOverABlindBackend(t *testing.T) {
+	shared := inmem.New("shared")
+	open := func(ns string) *memory.Store {
+		s, err := memory.NewStore(blind{shared, ns}, memory.Options{Namespace: ns, Retention: time.Hour})
+		require.NoError(t, err)
+		return s
+	}
+	a, b := open("a"), open("a/x")
+	user := content.Provenance{Kind: content.KindUser}
+	require.NoError(t, a.Remember(ctx, "x/ana", user, "a's fact"))
+	require.NoError(t, b.Remember(ctx, "ana", user, "b's fact"))
+	require.NoError(t, a.Append(ctx, "x/ana", "s1", user, "a's event"))
+	require.NoError(t, b.Append(ctx, "ana", "s1", user, "b's event"))
+
+	for _, c := range []struct {
+		s       *memory.Store
+		subject string
+		want    string
+	}{{a, "x/ana", "a's"}, {b, "ana", "b's"}} {
+		facts, err := c.s.Recall(ctx, c.subject, "", 10)
+		require.NoError(t, err)
+		assert.Equal(t, []string{c.want + " fact"}, raws(facts))
+		events, err := c.s.History(ctx, c.subject, "s1")
+		require.NoError(t, err)
+		assert.Equal(t, []string{c.want + " event"}, raws(events))
+	}
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+	facts, err := a.Recall(ctx, "x/ana", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a's fact"}, raws(facts), "not deleted with the other's subject")
+}
+
+func raws(ts []content.Text) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.(content.Untrusted).Raw()
+	}
+	return out
 }

@@ -22,7 +22,7 @@ func TestMessagesAreTheSessionAsConversation(t *testing.T) {
 		t.Run(v.String(), func(t *testing.T) {
 			p := &policy{verdict: v}
 			c := &clock{t: start}
-			s := newStore(t, inmem.New(), p, c)
+			s := newStore(t, inmem.New("test"), p, c)
 			for _, e := range []struct {
 				origin content.Kind
 				text   string
@@ -54,6 +54,6 @@ func TestMessagesAreTheSessionAsConversation(t *testing.T) {
 			}
 		})
 	}
-	_, err := memory.Messages(ctx, newStore(t, inmem.New(), &policy{}, &clock{t: start}), "ana", "")
+	_, err := memory.Messages(ctx, newStore(t, inmem.New("test"), &policy{}, &clock{t: start}), "ana", "")
 	assert.Error(t, err, "no session")
 }

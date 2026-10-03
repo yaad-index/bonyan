@@ -10,6 +10,10 @@
 //
 // The file and its write-ahead log are created readable by their owner only.
 // Keep the file outside the working tree.
+//
+// A backend is opened with a namespace and acts inside it only, so several
+// namespaces can share one file without seeing each other's records. Records
+// written before the file had namespaces are in the empty namespace.
 package sqlite
 
 import (
@@ -34,6 +38,7 @@ import (
 // Backend is a memory.Backend over one SQLite file.
 type Backend struct {
 	db *sql.DB
+	ns string
 }
 
 const schema = `
@@ -56,8 +61,8 @@ INSERT INTO records_text (records_text, rank) VALUES ('secure-delete', 1);
 `
 
 // Open opens the database at path, creating it owner-only if it does not
-// exist. The caller closes it.
-func Open(path string) (*Backend, error) {
+// exist, inside namespace. The caller closes it.
+func Open(path, namespace string) (*Backend, error) {
 	if path == "" {
 		return nil, errors.New("sqlite: empty path")
 	}
@@ -80,37 +85,48 @@ func Open(path string) (*Backend, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: schema: %w", err)
 	}
-	if err := addServer(db); err != nil {
+	// A database made before records had a server gets none on its records,
+	// so a policy trusting a named server does not trust them; one made
+	// before namespaces puts its records in the empty namespace.
+	for _, col := range []string{"server", "namespace"} {
+		if err := addColumn(db, col); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("sqlite: schema: %w", err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS records_namespace ON records (namespace, subject, layer, session, at)`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: schema: %w", err)
 	}
-	return &Backend{db: db}, nil
+	return &Backend{db: db, ns: namespace}, nil
 }
 
-// addServer adds the server column to a database made before records had one.
-// Its records get no server, so a policy trusting a named server does not
-// trust them.
-func addServer(db *sql.DB) error {
+// addColumn adds the text column name, empty on every record, to a database
+// made before records had it.
+func addColumn(db *sql.DB, name string) error {
 	rows, err := db.Query(`SELECT name FROM pragma_table_info('records')`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var have string
+		if err := rows.Scan(&have); err != nil {
 			return err
 		}
-		if name == "server" {
+		if have == name {
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = db.Exec(`ALTER TABLE records ADD COLUMN server TEXT NOT NULL DEFAULT ''`)
+	_, err = db.Exec(`ALTER TABLE records ADD COLUMN ` + name + ` TEXT NOT NULL DEFAULT ''`)
 	return err
 }
+
+// Namespace is the namespace b was opened with.
+func (b *Backend) Namespace() string { return b.ns }
 
 // Close closes the database.
 func (b *Backend) Close() error { return b.db.Close() }
@@ -123,8 +139,8 @@ func (b *Backend) Write(ctx context.Context, r memory.Record) (string, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO records (layer, subject, session, origin, server, text, at, verdict, policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(r.Layer), r.Subject, r.Session, string(r.Origin), r.Server, r.Text, r.At.UnixNano(), int(r.Decision.Verdict), r.Decision.Policy)
+		`INSERT INTO records (namespace, layer, subject, session, origin, server, text, at, verdict, policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.ns, string(r.Layer), r.Subject, r.Session, string(r.Origin), r.Server, r.Text, r.At.UnixNano(), int(r.Decision.Verdict), r.Decision.Policy)
 	if err != nil {
 		return "", err
 	}
@@ -148,8 +164,8 @@ const columns = `r.id, r.layer, r.subject, r.session, r.origin, r.server, r.text
 // History returns a session's events in the order they were written.
 func (b *Backend) History(ctx context.Context, subject, session string, since time.Time) ([]memory.Record, error) {
 	return b.query(ctx, `SELECT `+columns+` FROM records r
-		WHERE r.subject = ? AND r.layer = ? AND r.session = ? AND r.at >= ? ORDER BY r.at, r.id`,
-		subject, string(memory.ShortTerm), session, since.UnixNano())
+		WHERE r.namespace = ? AND r.subject = ? AND r.layer = ? AND r.session = ? AND r.at >= ? ORDER BY r.at, r.id`,
+		b.ns, subject, string(memory.ShortTerm), session, since.UnixNano())
 }
 
 // Recall returns the facts matching any word of query, best match first; an
@@ -158,13 +174,13 @@ func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, 
 	match := matchQuery(query)
 	if match == "" {
 		return b.query(ctx, `SELECT `+columns+` FROM records r
-			WHERE r.subject = ? AND r.layer = ? AND r.at >= ? ORDER BY r.at DESC, r.id DESC LIMIT ?`,
-			subject, string(memory.LongTerm), since.UnixNano(), limit)
+			WHERE r.namespace = ? AND r.subject = ? AND r.layer = ? AND r.at >= ? ORDER BY r.at DESC, r.id DESC LIMIT ?`,
+			b.ns, subject, string(memory.LongTerm), since.UnixNano(), limit)
 	}
 	return b.query(ctx, `SELECT `+columns+` FROM records_text f JOIN records r ON r.id = f.rowid
-		WHERE records_text MATCH ? AND r.subject = ? AND r.layer = ? AND r.at >= ?
+		WHERE records_text MATCH ? AND r.namespace = ? AND r.subject = ? AND r.layer = ? AND r.at >= ?
 		ORDER BY bm25(records_text), r.at DESC, r.id DESC LIMIT ?`,
-		match, subject, string(memory.LongTerm), since.UnixNano(), limit)
+		match, b.ns, subject, string(memory.LongTerm), since.UnixNano(), limit)
 }
 
 // matchQuery turns query into a full-text query matching any of its words,
@@ -209,27 +225,27 @@ func (b *Backend) query(ctx context.Context, q string, args ...any) ([]memory.Re
 
 // DeleteSubject deletes every record of subject.
 func (b *Backend) DeleteSubject(ctx context.Context, subject string) error {
-	return b.delete(ctx, `subject = ?`, subject)
+	return b.delete(ctx, `namespace = ? AND subject = ?`, b.ns, subject)
 }
 
-// DeleteBefore deletes every record written before t.
+// DeleteBefore deletes every record of the namespace written before t.
 func (b *Backend) DeleteBefore(ctx context.Context, t time.Time) error {
-	return b.delete(ctx, `at < ?`, t.UnixNano())
+	return b.delete(ctx, `namespace = ? AND at < ?`, b.ns, t.UnixNano())
 }
 
 // delete removes the matching records and their full-text entries in one
 // transaction, merges the index, then empties the write-ahead log so no older
 // frame keeps the deleted text.
-func (b *Backend) delete(ctx context.Context, where string, arg any) error {
+func (b *Backend) delete(ctx context.Context, where string, args ...any) error {
 	tx, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM records_text WHERE rowid IN (SELECT id FROM records WHERE `+where+`)`, arg); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM records_text WHERE rowid IN (SELECT id FROM records WHERE `+where+`)`, args...); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM records WHERE `+where, arg); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM records WHERE `+where, args...); err != nil {
 		return err
 	}
 	// Removing an entry from the index rewrites its segment, and the old copy
