@@ -125,3 +125,19 @@ func TestDeletingASubjectDeletesItsFullRecordings(t *testing.T) {
 	_, err = os.Stat(recordings[0])
 	assert.True(t, os.IsNotExist(err), "the full recording is gone")
 }
+
+// The assembled store scrubs what it writes with the program's own resolver,
+// the one the agent and its hooks scrub with.
+func TestTheAssembledMemoryScrubsWithTheProgramsSecrets(t *testing.T) {
+	t.Setenv("BONYAN_REGISTRY_MEMORY_SECRET", "SECRET-b52")
+	c, err := newRegistry(t).Assemble(memoryConfig(registry.MemoryInMem, "720h"), registry.WithSink(&events{}))
+	require.NoError(t, err)
+	ctx := context.Background()
+	_, err = c.Secrets.Scope("BONYAN_REGISTRY_MEMORY_SECRET").Resolve(ctx, "BONYAN_REGISTRY_MEMORY_SECRET")
+	require.NoError(t, err)
+	require.NoError(t, c.Memory.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "her key is SECRET-b52"))
+	got, err := c.Memory.Recall(ctx, "ana", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.NotContains(t, got[0].(content.Untrusted).Raw(), "SECRET-b52")
+}

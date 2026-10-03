@@ -755,7 +755,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 	}
 	out.Trust = guardPolicy(policyCfg.Impl, policy, ev)
 	if backend != nil {
-		store, err := memory.NewStore(backend, memory.Options{Policy: out.Trust, PolicyName: policyCfg.Impl, Retention: retention})
+		store, err := memory.NewStore(backend, memory.Options{Policy: out.Trust, PolicyName: policyCfg.Impl, Retention: retention, Scrubber: out.Secrets.Scrubber()})
 		if err != nil {
 			_ = out.Close()
 			return Components{}, err
