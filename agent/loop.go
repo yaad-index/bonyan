@@ -599,9 +599,9 @@ func (r *run) call(ctx context.Context, req model.ChatRequest) (model.ChatRespon
 		case err != nil:
 			return model.ChatResponse{}, ReasonTrustRefused, err
 		}
-		// Only the agent's own call carries its prompt; a call made for
-		// anything else, such as a classifier, does not.
-		resp, err := m.Chat(prompt.WithRef(ctx, r.prompt), sent)
+		// Only the agent's own call carries its prompt, and where its input
+		// is; a call made for anything else, such as a classifier, does not.
+		resp, err := m.Chat(r.withInput(prompt.WithRef(ctx, r.prompt)), sent)
 		if err == nil {
 			r.hooks.Run(ctx, hook.Event{Point: hook.AfterModel, Response: resp})
 			return resp, "", nil
@@ -619,6 +619,15 @@ func (r *run) call(ctx context.Context, req model.ChatRequest) (model.ChatRespon
 		return model.ChatResponse{}, ReasonModelFailed, errs[0]
 	}
 	return model.ChatResponse{}, ReasonFallbackExhausted, errors.Join(errs...)
+}
+
+// withInput returns ctx naming the run's input for the call's recording: the
+// first part of this run's first turn, which the request ends with.
+func (r *run) withInput(ctx context.Context) context.Context {
+	if len(r.current) == 0 || len(r.current[0].Parts) == 0 {
+		return ctx
+	}
+	return record.WithInput(ctx, r.current[0].Parts[0], len(r.current))
 }
 
 // looping counts a tool call and reports whether it has now been requested
