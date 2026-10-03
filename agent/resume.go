@@ -166,6 +166,10 @@ func (r *run) proceed(ctx context.Context) error {
 		r.suspend.err = ErrRunClaimed
 	case errors.Is(err, runstore.ErrProceeding):
 		r.suspend.err = ErrActionStarted
+	case errors.Is(err, runstore.ErrUnknown):
+		// The state is gone: a resume ran the run to its end, or the
+		// subject's data was deleted.
+		r.suspend.err = ErrUnknownRun
 	default:
 		r.suspend.err = fmt.Errorf("agent: the run store: %w", err)
 	}

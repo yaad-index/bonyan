@@ -294,6 +294,10 @@ func TestOnlyOneProcessTakesARun(t *testing.T) {
 	second := newProcess(t, runs, store, answer("second"))
 	held := make(chan string, 1)
 	second.agent.Approvals = attached{store, held}
+	// The second process's action waits until the first has given up, so
+	// the first meets the run claimed, not ended.
+	release := make(chan struct{})
+	second.agent.Tools = &blockingTools{tools: second.tools, release: release, started: make(chan struct{}, 4)}
 	secondDone := make(chan agent.Outcome, 1)
 	go func() {
 		out, _, err := agent.Resume(context.Background(), second.agent, id)
@@ -308,6 +312,7 @@ func TestOnlyOneProcessTakesARun(t *testing.T) {
 
 	require.NoError(t, store.Decide(context.Background(), aid, true))
 	got := <-firstDone
+	close(release)
 	assert.Equal(t, agent.ReasonNotApproved, got.out.Reason())
 	require.ErrorIs(t, got.rep.Err, agent.ErrRunClaimed)
 	out := <-secondDone
@@ -317,36 +322,29 @@ func TestOnlyOneProcessTakesARun(t *testing.T) {
 	assert.Equal(t, []string{"search"}, names(second.tools.calls))
 }
 
-// Concurrent resumes of one run have one winner.
+// Concurrent resumes of one run have one winner: while it waits on the
+// action, every other is refused as resumed elsewhere.
 func TestConcurrentResumesHaveOneWinner(t *testing.T) {
 	runs, store := runstore.NewMemory(), approval.NewMemory()
 	id, _, stop := suspended(t, runs, store, nil)
 	defer stop()
-	var mu sync.Mutex
-	var claimed, won int
-	var wg sync.WaitGroup
 	held := make(chan string, 8)
+	results := make(chan error, 8)
 	for range 8 {
 		p := newProcess(t, runs, store, answer("done"))
 		p.agent.Approvals = attached{store, held}
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			_, _, err := agent.Resume(context.Background(), p.agent, id)
-			mu.Lock()
-			defer mu.Unlock()
-			switch {
-			case err == nil:
-				won++
-			case assert.ErrorIs(t, err, agent.ErrRunClaimed):
-				claimed++
-			}
+			results <- err
 		}()
 	}
+	// The winner waits on the action until it is decided, so the seven
+	// others return first.
+	for range 7 {
+		require.ErrorIs(t, <-results, agent.ErrRunClaimed)
+	}
 	require.NoError(t, store.Decide(context.Background(), <-held, true))
-	wg.Wait()
-	assert.Equal(t, 1, won)
-	assert.Equal(t, 7, claimed)
+	require.NoError(t, <-results, "the winner")
 }
 
 // Once the action is decided and going ahead, the run cannot be resumed, so a
@@ -772,4 +770,22 @@ func TestAResumeOverBudgetLeavesTheRun(t *testing.T) {
 	out, _, err := resume(t, second, id, store, true)
 	require.NoError(t, err)
 	assert.True(t, out.Cleared())
+}
+
+// gone is a run store whose Proceed finds the run removed.
+type gone struct{ runstore.Store }
+
+func (gone) Proceed(context.Context, string, string) error { return runstore.ErrUnknown }
+
+// A run whose saved state was removed while it waited, by a resume that ran
+// it to its end or by deleting the subject, gives its action up as unknown.
+func TestARemovedRunGivesItsActionUp(t *testing.T) {
+	store := approval.NewMemory()
+	p := newProcess(t, gone{runstore.NewMemory()}, store, toolCall("search", `{"q":"x"}`), answer("done"))
+	go decideWhenHeld(t, store, true)
+	out, rep, err := agent.Run(context.Background(), p.agent, input("find x"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
+	require.ErrorIs(t, rep.Err, agent.ErrUnknownRun)
+	assert.Empty(t, p.tools.calls)
 }
