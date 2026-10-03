@@ -118,11 +118,13 @@ is applied is not a slot.
 - **The policy decides three things:**
   - **classification:** which content is untrusted, by its source. The sources bonyan names are
     program and operator instructions, user messages, uploads, fetched material, tool output, remote
-    tool output (returned by a tool served over the Model Context Protocol, §5) and recalled memory;
+    tool output (returned by a tool served over the Model Context Protocol, §5), model output read
+    back into a request (§4, §8) and recalled memory;
     a program can register further source kinds, and a policy can classify by any of them. Remote
     tool output is a source of its own so that a policy which trusts the program's own tools does
     not trust every tool server along with them. Elsewhere in this ADR, "tool output" and "tool
-    result" include it;
+    result" include remote tool output. Model output is a source of its own so that a model's reply
+    read back into a request is never taken for the user's message;
   - **marking:** how untrusted content is delimited and presented inside its section (the delimiter
     format, labels, an encoding of the text);
   - **handling:** what else happens when untrusted content is present, for example requiring
@@ -141,8 +143,8 @@ is applied is not a slot.
 - **Every decision is recorded** in the trace and the recording: the source kind, the decision and
   the policy's name, never the content (§9).
 - **The default policy** classifies everything that did not come from the program or the operator
-  (user messages, uploads, fetched material, tool output, remote tool output, memory extracted from
-  any of those) as
+  (user messages, uploads, fetched material, tool output, remote tool output, model output read
+  back into a request, memory extracted from any of those) as
   untrusted, marks it with a delimited, labelled section, and adds no further handling. A program
   that configures no policy gets exactly this.
 
@@ -188,7 +190,9 @@ Two other positions were considered and rejected:
   to each backend, so a fact planted by a fetched item cannot come back later as trusted context.
   The recorded source names the kind of material the fact was extracted from, remote tool output
   included, so a fact from a tool server is classified again as remote tool output and never as the
-  program's own tool output.
+  program's own tool output. Model output is a kind of its own in the same way: a fact extracted from
+  a model's reply keeps model output as its source, so it is classified again as model output and
+  never as the user's message or as material the program supplied.
 - **Privacy is part of the interface, not an afterthought:** every stored record carries its subject
   and its source; a retention period is configurable; deletion by subject is **required to
   implement** for every backend (bonyan can require and call it; for an external backend it cannot
@@ -282,7 +286,9 @@ Two other positions were considered and rejected:
   evaluator is itself a measurement with error, so its agreement with hand labels on a sample is
   reported beside its score, and it never runs as a gate on its own. A model-based evaluator is itself a model
   call reading untrusted context and answers (an answer claiming "this is grounded" is an injection
-  aimed at the judge), so it runs inside the same invariants, with its own budget. **Sampled live
+  aimed at the judge), so it runs inside the same invariants, with its own budget. The answer it
+  judges reaches it as model output (§3), untrusted under the default policy and inside a marked
+  section, never as the user's message. **Sampled live
   evaluation that sends user context to an evaluator model is opt-in and off by default.**
 - **Live evaluation is asynchronous.** An operator defines evaluators once; when live evaluation is
   enabled for an agent, each sampled run is handed off after it finishes, never inside it, so
@@ -491,3 +497,6 @@ attached in code.
   denied call, it is cancelled at once when no hook approved, denied or said pending and at the
   timeout when one said pending, a failing hook denies it, and every outcome is recorded, with the
   deciding hook when there is one.
+- §3, §4, §8: model output read back into a request (an answer an evaluator judges, a reply kept in
+  session history) is a source of its own, untrusted under the default policy and kept as a recalled
+  fact's source.
