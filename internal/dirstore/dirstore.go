@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	lockName = ".lock"
-	suffix   = ".json"
+	lockName   = ".lock"
+	suffix     = ".json"
+	tempPrefix = ".tmp-"
 )
 
 // Dir is an opened store.
@@ -64,7 +65,10 @@ type Tx struct {
 }
 
 // Locked runs fn holding the store's lock, which no other process or
-// goroutine using the store holds at the same time.
+// goroutine using the store holds at the same time. Every write happens
+// under the lock, so a temporary file found while holding it was left by a
+// writer that crashed before its rename; it can hold a whole record, of a
+// subject being deleted for instance, so it is removed before fn runs.
 func (d *Dir) Locked(fn func(tx Tx) error) error {
 	f, err := os.OpenFile(filepath.Join(d.path, lockName), os.O_RDWR, 0o600)
 	if err != nil {
@@ -81,7 +85,31 @@ func (d *Dir) Locked(fn func(tx Tx) error) error {
 		return fmt.Errorf("dirstore: lock: %w", err)
 	}
 	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	if err := d.removeTemps(); err != nil {
+		return err
+	}
 	return fn(Tx{d: d})
+}
+
+// removeTemps removes every temporary file a crashed write left.
+func (d *Dir) removeTemps() error {
+	entries, err := os.ReadDir(d.path)
+	if err != nil {
+		return fmt.Errorf("dirstore: %w", err)
+	}
+	removed := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), tempPrefix) {
+			if err := os.Remove(filepath.Join(d.path, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("dirstore: %w", err)
+			}
+			removed = true
+		}
+	}
+	if removed {
+		return d.syncDir()
+	}
+	return nil
 }
 
 // ErrNotFound is a name the store holds no file under.
@@ -119,7 +147,7 @@ func (tx Tx) Put(name string, v any) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(tx.d.path, ".tmp-")
+	tmp, err := os.CreateTemp(tx.d.path, tempPrefix)
 	if err != nil {
 		return fmt.Errorf("dirstore: %w", err)
 	}

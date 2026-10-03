@@ -81,3 +81,18 @@ func TestDirAcrossProcesses(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, map[string]int{"won": 1, "claimed": 7}, results)
 }
+
+// Deleting a subject leaves none of its saved state behind, not even in a
+// temporary file a crashed save left.
+func TestDirDeleteSubjectLeavesNoLeftover(t *testing.T) {
+	path := t.TempDir() + "/runs"
+	d, err := runstore.OpenDir(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path+"/.tmp-crashed", []byte(`{"state":{"Run":"r9","Subject":"ana","Data":"U0VDUkVULXN0YXRl"}}`), 0o600))
+	require.NoError(t, d.DeleteSubject(context.Background(), "ana"))
+	entries, err := os.ReadDir(path)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.Equal(t, ".lock", e.Name(), "only the lock is left")
+	}
+}

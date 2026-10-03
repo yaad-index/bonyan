@@ -101,3 +101,18 @@ func TestTheLockExcludes(t *testing.T) {
 	require.NoError(t, d.Locked(func(tx dirstore.Tx) error { return tx.Get("n", &n) }))
 	assert.Equal(t, 80, n)
 }
+
+// A temporary file a crashed write left behind is removed by the next
+// operation, so what it held does not outlive a deletion.
+func TestALeftoverTemporaryFileIsRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s")
+	d, err := dirstore.Open(path)
+	require.NoError(t, err)
+	left := filepath.Join(path, ".tmp-123")
+	require.NoError(t, os.WriteFile(left, []byte(`{"subject":"ana"}`), 0o600))
+	require.NoError(t, d.Locked(func(tx dirstore.Tx) error {
+		_, err := os.Stat(left)
+		assert.ErrorIs(t, err, os.ErrNotExist, "gone before the operation runs")
+		return nil
+	}))
+}
