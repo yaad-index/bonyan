@@ -12,5 +12,5 @@ func TestConformance(t *testing.T) {
 	memorytest.Run(t, func(*testing.T) memorytest.Open {
 		s := inmem.NewStorage()
 		return func(namespace string) memory.Backend { return s.Open(namespace) }
-	})
+	}, memorytest.Lexical)
 }

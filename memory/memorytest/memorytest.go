@@ -25,11 +25,26 @@ import (
 // one Open returns shares it.
 type Open func(namespace string) memory.Backend
 
+// Option adds checks to the suite.
+type Option func(*config)
+
+type config struct{ lexical bool }
+
+// Lexical checks the lexical recall contract as well, for a backend that
+// matches a fact by the words it holds: a fact matches a query when it holds
+// any word of it, and only then. A backend that matches by meaning, which
+// also returns near matches, leaves it out.
+func Lexical(c *config) { c.lexical = true }
+
 // Run runs the suite. newStorage returns an Open over an empty storage for each
 // test.
-func Run(t *testing.T, newStorage func(t *testing.T) Open) {
+func Run(t *testing.T, newStorage func(t *testing.T) Open, opts ...Option) {
 	t.Helper()
-	for _, c := range []struct {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+	cases := []struct {
 		name string
 		test func(t *testing.T, b memory.Backend)
 	}{
@@ -38,11 +53,17 @@ func Run(t *testing.T, newStorage func(t *testing.T) Open) {
 		{"LayersAreSeparate", layersAreSeparate},
 		{"RecallHonoursTheLimit", recallHonoursTheLimit},
 		{"RecallFindsAFactByItsText", recallFindsAFactByItsText},
-		{"RecallMatchesAnyWord", recallMatchesAnyWord},
 		{"DeleteSubjectRemovesEventsAndFacts", deleteSubjectRemovesEventsAndFacts},
 		{"ReadsHonourTheCutoff", readsHonourTheCutoff},
 		{"DeleteBeforeRemovesOlderRecords", deleteBeforeRemovesOlderRecords},
-	} {
+	}
+	if cfg.lexical {
+		cases = append(cases, struct {
+			name string
+			test func(t *testing.T, b memory.Backend)
+		}{"RecallMatchesAnyWord", recallMatchesAnyWord})
+	}
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { c.test(t, newStorage(t)("suite")) })
 	}
 	t.Run("NamespacesNeverSeeEachOther", func(t *testing.T) { namespacesNeverSeeEachOther(t, newStorage(t)) })

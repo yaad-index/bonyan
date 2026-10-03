@@ -94,11 +94,13 @@ type Backend interface {
 	// after since, oldest first.
 	History(ctx context.Context, subject, session string, since time.Time) ([]Record, error)
 	// Recall returns at most limit facts about subject written at or after
-	// since that match query, most relevant first. A fact matches when it
-	// holds any word of the query; an empty query matches every fact. How
-	// well the matches are ranked is the backend's own: memory/sqlite ranks
-	// by bm25, which weighs rare words above common ones, while memory/inmem
-	// counts matched words, a reference rather than a recommendation.
+	// since that match query, most relevant first. Which facts match, and how
+	// they are ranked, is the backend's own: a lexical backend matches a fact
+	// holding any word of the query (memory/sqlite, ranking by bm25, which
+	// weighs rare words above common ones; memory/inmem, counting matched
+	// words, a reference rather than a recommendation), while one that
+	// matches by meaning also returns near matches. Every backend ranks a fact
+	// whose text is the query's first, and an empty query matches every fact.
 	Recall(ctx context.Context, subject, query string, limit int, since time.Time) ([]Record, error)
 	// DeleteSubject deletes every record of subject, events and facts alike.
 	DeleteSubject(ctx context.Context, subject string) error
