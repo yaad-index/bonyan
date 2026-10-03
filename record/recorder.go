@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync/atomic"
 
 	"github.com/yaad-index/bonyan/content"
@@ -77,6 +78,54 @@ func runOf(ctx context.Context) string {
 	return id
 }
 
+type inputKey struct{}
+
+// inputAt is where the run's input is in a call's request.
+type inputAt struct {
+	text    content.Text
+	fromEnd int
+}
+
+// WithInput returns ctx for a chat call whose request holds the run's input,
+// t, as the first part of the message fromEnd messages from the end of the
+// request. The call's recording marks that part as the run's input when it
+// is still there and still t.
+func WithInput(ctx context.Context, t content.Text, fromEnd int) context.Context {
+	return context.WithValue(ctx, inputKey{}, inputAt{text: t, fromEnd: fromEnd})
+}
+
+// markInput marks, in rec, the part of req that ctx says holds the run's
+// input, when it is still that input.
+func markInput(ctx context.Context, req model.ChatRequest, rec *Request) {
+	at, ok := ctx.Value(inputKey{}).(inputAt)
+	i := len(req.Messages) - at.fromEnd
+	if !ok || at.fromEnd <= 0 || i < 0 || len(req.Messages[i].Parts) == 0 || !sameText(req.Messages[i].Parts[0], at.text) {
+		return
+	}
+	rec.Messages[i].Parts[0].Input = true
+}
+
+// sameText reports whether a and b, each a section or trusted text as the
+// agent puts its input, are the same text from the same source. A section is
+// the same when its label and items are, marked or not.
+func sameText(a, b content.Text) bool {
+	if m, ok := a.(content.Marked); ok {
+		a = m.Section()
+	}
+	if m, ok := b.(content.Marked); ok {
+		b = m.Section()
+	}
+	switch x := a.(type) {
+	case content.Section:
+		y, ok := b.(content.Section)
+		return ok && x.Label() == y.Label() && slices.Equal(x.Items(), y.Items())
+	case content.Trusted:
+		y, ok := b.(content.Trusted)
+		return ok && x == y
+	}
+	return false
+}
+
 // Start records the start of the run ctx is inside, marked as evaluation
 // when ctx is (WithEvaluation).
 func (r *Recorder) Start(ctx context.Context, s Start) {
@@ -141,6 +190,8 @@ func (r *Recorder) Call(ctx context.Context, modelName string, req model.ChatReq
 			Request:     &rec,
 			Prompt:      promptOf(ctx),
 		}
+		// After the fingerprint, which a replay, knowing no input, matches.
+		markInput(ctx, req, &rec)
 		if callErr != nil {
 			c.ErrorKind = errorKind(callErr)
 		} else {

@@ -137,6 +137,11 @@ type Part struct {
 	// label and its items, each recorded as an untrusted part.
 	Section string `json:"section,omitempty"`
 	Items   []Part `json:"items,omitempty"`
+	// Input marks the part that holds the message the run started from, as
+	// the agent put it in the request. A recording made before the marker
+	// existed has none, and a call whose hooks moved or changed that part
+	// has none either. It takes no part in the call's fingerprint.
+	Input bool `json:"input,omitempty"`
 }
 
 // Provenance is where an untrusted part came from.

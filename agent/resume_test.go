@@ -863,3 +863,49 @@ type failingHold struct{ approval.Store }
 func (failingHold) Hold(context.Context, approval.Pending) (<-chan approval.Decision, error) {
 	return nil, errors.New("disk full")
 }
+
+// callSink keeps the chat calls recorded.
+type callSink struct {
+	eventSink
+	calls []record.Call
+}
+
+func (s *callSink) Write(e record.Entry) error {
+	s.mu.Lock()
+	if e.Call != nil {
+		s.calls = append(s.calls, *e.Call)
+	}
+	s.mu.Unlock()
+	return s.eventSink.Write(e)
+}
+
+// A resumed run's calls mark its input, the message it started from, which
+// its restored turns begin with.
+func TestAResumedRunMarksItsInput(t *testing.T) {
+	runs, store := runstore.NewMemory(), approval.NewMemory()
+	id, _, stop := suspended(t, runs, store, nil)
+	defer stop()
+	second := newProcess(t, runs, store, answer("done"))
+	sink := &callSink{}
+	rec, err := record.NewRecorder(sink, secret.NewScrubber())
+	require.NoError(t, err)
+	second.agent.Recorder = rec
+	out, _, err := resume(t, second, id, store, true)
+	require.NoError(t, err)
+	require.True(t, out.Cleared(), out.String())
+	require.NotEmpty(t, sink.calls)
+	for _, c := range sink.calls {
+		var marked []record.Part
+		for _, m := range c.Request.Messages {
+			for _, p := range m.Parts {
+				if p.Input {
+					marked = append(marked, p)
+				}
+			}
+		}
+		require.Len(t, marked, 1)
+		assert.Equal(t, agent.SectionUserMessage, marked[0].Section)
+		require.Len(t, marked[0].Items, 1)
+		assert.Equal(t, "find x", marked[0].Items[0].Text)
+	}
+}

@@ -556,10 +556,12 @@ func TestAGridComparesPromptVersions(t *testing.T) {
 
 // A re-run sends the recorded run's own message, with its source, and not the
 // material or the earlier conversation placed before it, whether the trust
-// policy left the message untrusted or declared it trusted. This pins the
-// layout the message is found by: if context assembly put anything after
-// this run's message, or the loop stopped labelling its section, the re-run
-// would send something else or refuse, and this test fails.
+// policy left the message untrusted or declared it trusted, and whether the
+// recording marks the message or, made before the marker, does not. Without
+// the marker this pins the layout the message is found by: if context
+// assembly put anything after this run's message, or the loop stopped
+// labelling its section, the re-run would send something else or refuse, and
+// this test fails.
 func TestTheRunsMessageIsFound(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -568,40 +570,132 @@ func TestTheRunsMessageIsFound(t *testing.T) {
 		{"untrusted", nil},
 		{"trusted by the policy", trustOnly(content.KindFetched)},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
-			a.Trust = tc.policy
-			a.Material = []content.Untrusted{content.From(content.Provenance{Kind: content.KindFetched, ID: "doc"}, "MATERIAL-7d1")}
-			a.History = []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.From(content.Provenance{Kind: content.KindUser, ID: "m0"}, "EARLIER-7d1")}}}
-			f, err := record.OpenFile(record.FileOptions{Dir: t.TempDir()})
-			require.NoError(t, err)
-			a.Recorder, err = record.NewRecorder(f, secret.NewScrubber())
-			require.NoError(t, err)
-			mail := content.From(content.Provenance{Kind: content.KindFetched, ID: "mail-1"}, "find x")
-			_, _, err = agent.Run(context.Background(), a, mail)
-			require.NoError(t, err)
-			require.NoError(t, f.Close())
-			raw, err := os.ReadFile(f.Path())
-			require.NoError(t, err)
-			_, runs, err := record.ReadRuns(bytes.NewReader(raw))
-			require.NoError(t, err)
-			require.Len(t, runs, 1)
-			first := runs[0].Calls[0].Request.Messages
-			assert.Equal(t, tc.policy != nil, first[len(first)-1].Parts[0].Trusted, "recorded in the form under test")
+		for _, marked := range []bool{true, false} {
+			t.Run(tc.name+map[bool]string{true: ", marked", false: ", unmarked"}[marked], func(t *testing.T) {
+				a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
+				a.Trust = tc.policy
+				a.Material = []content.Untrusted{content.From(content.Provenance{Kind: content.KindFetched, ID: "doc"}, "MATERIAL-7d1")}
+				a.History = []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.From(content.Provenance{Kind: content.KindUser, ID: "m0"}, "EARLIER-7d1")}}}
+				mail := content.From(content.Provenance{Kind: content.KindFetched, ID: "mail-1"}, "find x")
+				run := recordedFrom(t, a, mail)
+				first := run.Calls[0].Request.Messages
+				assert.Equal(t, tc.policy != nil, first[len(first)-1].Parts[0].Trusted, "recorded in the form under test")
+				require.True(t, first[len(first)-1].Parts[0].Input, "recorded with the marker")
+				if !marked {
+					unmark(run)
+				}
 
-			m := &searchThenAnswer{args: `{"q":"x"}`}
-			b := searchAgent(m, &liveTools{out: "r"})
-			_, err = eval.Rerun{Agent: b, Evaluators: all}.Run(context.Background(), runs[0])
-			require.NoError(t, err)
-			require.NotEmpty(t, m.reqs)
-			msgs := m.reqs[0].Messages
-			require.Len(t, msgs, 2, "the instructions and the run's message, nothing else")
-			items := mustSection(t, msgs[1])
-			require.Len(t, items, 1)
-			assert.Equal(t, "find x", items[0].Raw())
-			assert.Equal(t, content.Provenance{Kind: content.KindFetched, ID: "mail-1"}, items[0].Provenance(), "with its own source")
+				m := &searchThenAnswer{args: `{"q":"x"}`}
+				b := searchAgent(m, &liveTools{out: "r"})
+				_, err := eval.Rerun{Agent: b, Evaluators: all}.Run(context.Background(), run)
+				require.NoError(t, err)
+				require.NotEmpty(t, m.reqs)
+				msgs := m.reqs[0].Messages
+				require.Len(t, msgs, 2, "the instructions and the run's message, nothing else")
+				items := mustSection(t, msgs[1])
+				require.Len(t, items, 1)
+				assert.Equal(t, "find x", items[0].Raw())
+				assert.Equal(t, content.Provenance{Kind: content.KindFetched, ID: "mail-1"}, items[0].Provenance(), "with its own source")
+			})
+		}
+	}
+}
+
+// recordedFrom records a run of a started from in and returns it.
+func recordedFrom(t *testing.T, a agent.Agent, in content.Untrusted) record.Run {
+	t.Helper()
+	f, err := record.OpenFile(record.FileOptions{Dir: t.TempDir()})
+	require.NoError(t, err)
+	a.Recorder, err = record.NewRecorder(f, secret.NewScrubber())
+	require.NoError(t, err)
+	_, _, err = agent.Run(context.Background(), a, in)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	raw, err := os.ReadFile(f.Path())
+	require.NoError(t, err)
+	_, runs, err := record.ReadRuns(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	return runs[0]
+}
+
+// unmark removes the input marker from every call of run, as in a recording
+// made before it existed.
+func unmark(run record.Run) {
+	for _, c := range run.Calls {
+		if c.Request == nil {
+			continue
+		}
+		for _, m := range c.Request.Messages {
+			for i := range m.Parts {
+				m.Parts[i].Input = false
+			}
+		}
+	}
+}
+
+// markedAt returns the place of each part req marks as the run's input, as
+// message index and part index.
+func markedAt(req *record.Request) [][2]int {
+	var out [][2]int
+	for i, m := range req.Messages {
+		for j, p := range m.Parts {
+			if p.Input {
+				out = append(out, [2]int{i, j})
+			}
+		}
+	}
+	return out
+}
+
+// Every chat call of a run marks the run's input, once: the first part of the
+// run's first turn, which ends the first request and comes before the turns
+// after it in later ones.
+func TestEveryCallMarksTheRunsInput(t *testing.T) {
+	for name, policy := range map[string]trust.Policy{"untrusted": nil, "trusted by the policy": trustOnly(content.KindUser)} {
+		t.Run(name, func(t *testing.T) {
+			a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
+			a.Trust = policy
+			run := recordedFrom(t, a, input("find x"))
+			var chats int
+			for _, c := range run.Calls {
+				if c.Kind != record.KindChat {
+					continue
+				}
+				chats++
+				msgs := c.Request.Messages
+				// The run's turns so far: its message, then an assistant turn
+				// and a tool result for every call before this one.
+				want := len(msgs) - (1 + 2*(chats-1))
+				assert.Equal(t, [][2]int{{want, 0}}, markedAt(c.Request), "call %d", chats)
+			}
+			assert.Equal(t, 2, chats)
 		})
 	}
+}
+
+// An earlier turn the same as the run's message, the same text from the same
+// source, both declared trusted so no section label tells them apart, is not
+// the part marked: the agent says where its input is, and the recording
+// marks only that place. The provenance ID is equal too, so value equality
+// alone could not tell them apart.
+func TestAnIdenticalEarlierTurnIsNotMarked(t *testing.T) {
+	a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
+	a.Trust = trustOnly(content.KindUser)
+	a.History = []model.Message{
+		{Role: model.RoleUser, Parts: []content.Text{input("find x")}},
+		{Role: model.RoleAssistant, Parts: []content.Text{content.From(content.Provenance{Kind: content.KindModel}, "found it")}},
+	}
+	run := recordedFrom(t, a, input("find x"))
+	first := run.Calls[0].Request
+	var copies []int
+	for i, m := range first.Messages {
+		if len(m.Parts) > 0 && m.Parts[0].Trusted && m.Parts[0].Text == "find x" && *m.Parts[0].Provenance == (record.Provenance{Kind: content.KindUser, ID: "m1"}) {
+			copies = append(copies, i)
+		}
+	}
+	require.Len(t, copies, 2, "the earlier turn and the run's message, recorded alike")
+	assert.Equal(t, [][2]int{{copies[1], 0}}, markedAt(first), "the run's own, the later one")
 }
 
 // mustSection is the items of the one section m holds.
