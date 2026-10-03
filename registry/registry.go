@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yaad-index/bonyan/approval"
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/eval/score"
 	"github.com/yaad-index/bonyan/hook"
@@ -29,6 +30,7 @@ import (
 	"github.com/yaad-index/bonyan/memory/inmem"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/runstore"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
@@ -49,6 +51,8 @@ const (
 	SlotMemory     = "memory"
 	SlotEvaluator  = "evaluator"
 	SlotQueue      = "eval_queue"
+	SlotApprovals  = "approvals"
+	SlotRunStore   = "run_store"
 )
 
 // QueueInMem is the name the in-process evaluation queue is registered under.
@@ -160,11 +164,14 @@ type Registry struct {
 	memories    *slot[memory.Backend]
 	evaluators  *slot[score.Evaluator]
 	queues      *slot[record.Queue]
+	approvals   *slot[approval.Store]
+	runStores   *slot[runstore.Store]
 }
 
 // New returns a registry holding only the built-ins: the default trust policy,
 // under trust.DefaultName, the environment and directory secret sources, the
-// file recording sink and the in-process memory backend.
+// file recording sink, the in-process memory backend and evaluation queue,
+// and the in-process and directory approval stores and run stores.
 func New() *Registry {
 	r := &Registry{
 		chat:        newSlot[model.Chat](SlotChat),
@@ -177,7 +184,10 @@ func New() *Registry {
 		memories:    newSlot[memory.Backend](SlotMemory),
 		evaluators:  newSlot[score.Evaluator](SlotEvaluator),
 		queues:      newSlot[record.Queue](SlotQueue),
+		approvals:   newSlot[approval.Store](SlotApprovals),
+		runStores:   newSlot[runstore.Store](SlotRunStore),
 	}
+	registerStores(r)
 	r.queues.factories[QueueInMem] = memQueue
 	r.policies.factories[trust.DefaultName] = func(json.RawMessage) (trust.Policy, error) {
 		return trust.Default{}, nil
@@ -329,6 +339,13 @@ type Config struct {
 	// Evaluation turns on live evaluation: finished runs are handed to a
 	// queue, which an eval.Worker drains. With none, no run is queued.
 	Evaluation *EvaluationConfig `json:"evaluation,omitempty"`
+	// Approvals selects the store that holds actions whose approval is
+	// pending (ADR 0001 §7). With none, a pending answer cancels the action.
+	Approvals *SlotConfig `json:"approvals,omitempty"`
+	// RunStore selects where a run waiting on approval is saved, so it can be
+	// resumed after a restart; it needs Approvals. With none, nothing is
+	// saved and a restart cancels the run.
+	RunStore *RunStoreConfig `json:"run_store,omitempty"`
 }
 
 // EvaluationConfig selects the evaluation queue and how runs are handed to it
@@ -376,6 +393,15 @@ type Components struct {
 	// EvalQueue is the evaluation queue the Recorder hands finished runs to.
 	// It is nil when live evaluation is not configured.
 	EvalQueue record.Queue
+	// Approvals is the approval store, for agent.Agent.Approvals; nil when
+	// none is configured.
+	Approvals approval.Store
+	// RunStore is the run store, for agent.Agent.RunStore; nil when none is
+	// configured. With Memory configured too, deleting a subject from Memory
+	// deletes the subject's saved runs; without it, the program calls
+	// RunStore.DeleteSubject itself. Runs older than the retention period are
+	// removed only when the program calls RunStore.Purge.
+	RunStore *RunStore
 
 	// owned is a sink the registry opened, which Close closes.
 	owned record.Sink
@@ -747,6 +773,10 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 			store.OnDeleteSubject("evaluation queue", out.Recorder.DeleteSubject)
 		}
 	}
+	if err := r.assembleStores(cfg, &out); err != nil {
+		_ = out.Close()
+		return Components{}, err
+	}
 	out.Hooks = &Hooks{byPoint: map[hook.Point][]guardedHook{}, scrub: out.Secrets.Scrubber(), rec: ev}
 	for point, list := range hooks {
 		for _, x := range list {
@@ -777,6 +807,14 @@ func (r *Registry) Names(slotName string) []string {
 		return r.sinks.names()
 	case SlotMemory:
 		return r.memories.names()
+	case SlotEvaluator:
+		return r.evaluators.names()
+	case SlotQueue:
+		return r.queues.names()
+	case SlotApprovals:
+		return r.approvals.names()
+	case SlotRunStore:
+		return r.runStores.names()
 	}
 	return nil
 }

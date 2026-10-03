@@ -179,6 +179,8 @@ func TestEveryPartIsWrapped(t *testing.T) {
 		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"},
 		Evaluators: []registry.SlotConfig{{Impl: "basic"}},
 		Evaluation: &registry.EvaluationConfig{Queue: registry.SlotConfig{Impl: registry.QueueInMem, Options: json.RawMessage(`{"retention":"1h"}`)}, Rate: 1},
+		Approvals:  &registry.SlotConfig{Impl: registry.ApprovalsInMem},
+		RunStore:   &registry.RunStoreConfig{SlotConfig: registry.SlotConfig{Impl: registry.RunStoreInMem}, Retention: "720h"},
 	}, registry.WithSink(&events{}))
 	require.NoError(t, err)
 
