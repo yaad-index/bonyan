@@ -183,6 +183,14 @@ Two other positions were considered and rejected:
 - **External backends plug into the same interface** (for example a dedicated user-memory service
   run as a separate process). bonyan calls such a service over its API and does not vendor it, which
   also keeps bonyan's licence independent of the backend's.
+- **Memory has a namespace**, required in the memory configuration and applied by bonyan when it
+  builds the store, not left to the program or the backend. Every subject bonyan passes to a backend
+  is qualified by the namespace, escaped so that no subject can name another namespace; a record
+  outside the namespace is dropped on read; and a backend is opened with the namespace, so that what
+  it does across subjects, such as deleting what retention expired, stays inside it. A backend
+  refuses to read or delete outside its namespace. Programs sharing one backend, such as two
+  instances of one application, each have their own namespace and never see each other's records;
+  the conformance suite checks that two namespaces on one backend never do.
 - **A backend for an external service is a module of its own**, under `memory/` in bonyan's
   repository with its own `go.mod`, as the basic sqlite backend is. A program registers it under a
   name and it plugs in like any backend; it must pass the conformance suite. The core module carries
@@ -572,4 +580,6 @@ attached in code.
   kind when there are several, the stricter decision winning; a backend's own model calls are
   outside bonyan's budget and recordings; deletion by subject covers derived facts; a backend for
   an external service is its own module under `memory/`, as the sqlite backend is, registered under
-  a name and passing the conformance suite, with no code or dependency of it in the core module.
+  a name and passing the conformance suite, with no code or dependency of it in the core module;
+  memory has a required namespace, applied by bonyan, which qualifies every subject passed to a
+  backend, confines a backend's reads and deletions, and keeps programs sharing a backend apart.
