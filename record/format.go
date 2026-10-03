@@ -140,7 +140,9 @@ type Part struct {
 type Provenance struct {
 	Kind   content.Kind `json:"kind"`
 	Origin content.Kind `json:"origin,omitempty"`
-	ID     string       `json:"id,omitempty"`
+	// Server is the tool server's name, for remote tool output.
+	Server string `json:"server,omitempty"`
+	ID     string `json:"id,omitempty"`
 }
 
 // Tool is a recorded tool definition.
@@ -188,10 +190,12 @@ const ErrorOther model.ErrorKind = "other"
 // policy failure, a tool call that gave no result, or an answer sent back
 // for another try. It never holds content.
 type Event struct {
-	Slot     string `json:"slot"`
-	Name     string `json:"name"`
-	Point    string `json:"point,omitempty"`
-	Source   string `json:"source,omitempty"`
+	Slot   string `json:"slot"`
+	Name   string `json:"name"`
+	Point  string `json:"point,omitempty"`
+	Source string `json:"source,omitempty"`
+	// Server is the tool server's name, when Source is remote tool output.
+	Server   string `json:"server,omitempty"`
 	Decision string `json:"decision,omitempty"`
 	Failure  string `json:"failure,omitempty"`
 	// Item and Tokens describe an item left out of a call's context: its

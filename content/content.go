@@ -85,6 +85,12 @@ type Provenance struct {
 	// the recalled fact was extracted from (fetched, user, tool, remote tool
 	// or model). It is empty for every other kind.
 	Origin Kind
+	// Server names the tool server remote tool output came from, by the name
+	// the program registered the server under, never one the server reports
+	// (ADR 0001 §3). It is set for KindRemoteTool, and for KindMemory when
+	// Origin is KindRemoteTool; it is empty for every other kind. A policy may
+	// classify by it.
+	Server string
 	// ID identifies the specific source (a message id, a URL, a tool call id).
 	// It is for tracing and audit, never for trust decisions.
 	ID string

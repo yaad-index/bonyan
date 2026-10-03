@@ -46,6 +46,18 @@ type Tools interface {
 	NeedsApproval(name string) bool
 }
 
+// Servers is implemented by Tools that serve tools from tool servers and
+// name the server behind each (*tool.Registry does). The name goes into the
+// source of a remote tool's results, so a trust policy can trust one server
+// and not another (ADR 0001 §3). Tools that do not implement it give remote
+// tool output with no server name, which a policy trusting a named server
+// does not trust.
+type Servers interface {
+	// Server is the name the program registered the named tool's server
+	// under, or empty.
+	Server(name string) string
+}
+
 // Model is a chat model with the name the price table and recordings know it
 // by.
 type Model struct {
@@ -752,7 +764,11 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, Re
 	if ran {
 		kind = r.a.Tools.Source(call.Name)
 	}
-	result := content.From(content.Provenance{Kind: kind, ID: tc.ID}, text)
+	from := content.Provenance{Kind: kind, ID: tc.ID}
+	if s, ok := r.a.Tools.(Servers); ok && kind == content.KindRemoteTool {
+		from.Server = s.Server(call.Name)
+	}
+	result := content.From(from, text)
 	var out content.Text = result
 	if ran {
 		out = registry.Classify(ctx, r.policy, result)

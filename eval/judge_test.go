@@ -357,3 +357,19 @@ func TestAReplyAHookChangedIsJudgedOnlyFromTheAnswerGiven(t *testing.T) {
 	require.Len(t, m.reqs, 1, "judged from the recording")
 	assert.Equal(t, given, itemsOf(m.reqs[0])[0].text)
 }
+
+// An item from a tool server reaches the judge naming its server, so the
+// judge's policy classifies it as the run's did.
+func TestAJudgedItemKeepsItsServer(t *testing.T) {
+	a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, servedTools{&liveTools{out: resultSeen, kind: content.KindRemoteTool}, "docs"})
+	m := &judgeModel{verdict: `{"claims":[],"invented_citations":0}`}
+	_, failed := evaluate(t, recorded(t, a, "find x"), eval.Groundedness{Judge: judgeAgent(m)})
+	require.Empty(t, failed)
+	var got []content.Provenance
+	for _, it := range itemsOf(m.reqs[0]) {
+		if it.from.Kind == content.KindRemoteTool {
+			got = append(got, it.from)
+		}
+	}
+	assert.Equal(t, []content.Provenance{{Kind: content.KindRemoteTool, Server: "docs", ID: "c1"}}, got)
+}

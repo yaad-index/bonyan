@@ -297,3 +297,16 @@ func TestAHeaderIsCheckedAsItIsSent(t *testing.T) {
 	assert.Len(t, ev.got, 1)
 	assert.Equal(t, 1, n, "called once for the one source")
 }
+
+// A dropped item from a tool server is recorded with the server's name, and
+// the handler sees it.
+func TestADroppedRemoteItemNamesItsServer(t *testing.T) {
+	remote := content.From(content.Provenance{Kind: content.KindRemoteTool, Server: "web", ID: "r1"}, "result")
+	rec, ev := recorder(t)
+	h := &policy{handle: func([]trust.Item) (trust.Handling, error) { return trust.Handling{Drop: []int{0}}, nil }}
+	_, err := registry.Enforce(context.Background(), registry.GuardPolicy(handlingPolicy{h}, rec), request(content.NewSection("tool result", remote)))
+	require.NoError(t, err)
+	require.Len(t, h.seen, 1)
+	assert.Equal(t, "web", h.seen[0][0].Source.Server)
+	assert.Contains(t, ev.got, record.Event{Slot: registry.SlotTrust, Name: "program", Decision: registry.DecisionDropped, Source: "remote-tool", Server: "web", Item: "r1"})
+}

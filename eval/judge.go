@@ -235,10 +235,10 @@ func judgeInput(s score.Subject) (judged, bool, error) {
 	}
 	in := judged{question: question, answer: answer}
 	type key struct {
-		kind, origin content.Kind
-		id, text     string
+		kind, origin     content.Kind
+		server, id, text string
 	}
-	seen := map[key]bool{{question.Provenance().Kind, "", question.Provenance().ID, question.Raw()}: true}
+	seen := map[key]bool{{question.Provenance().Kind, "", "", question.Provenance().ID, question.Raw()}: true}
 	unjudged := map[key]bool{}
 	var walk func([]record.Part)
 	walk = func(parts []record.Part) {
@@ -247,7 +247,7 @@ func judgeInput(s score.Subject) (judged, bool, error) {
 			if p.Provenance == nil {
 				continue
 			}
-			k := key{p.Provenance.Kind, p.Provenance.Origin, p.Provenance.ID, p.Text}
+			k := key{p.Provenance.Kind, p.Provenance.Origin, p.Provenance.Server, p.Provenance.ID, p.Text}
 			if p.Excluded {
 				in.excluded = true
 				unjudged[k] = true
@@ -257,7 +257,7 @@ func judgeInput(s score.Subject) (judged, bool, error) {
 				continue
 			}
 			seen[k] = true
-			in.items = append(in.items, content.From(content.Provenance{Kind: k.kind, Origin: k.origin, ID: itemID(len(in.items))}, p.Text))
+			in.items = append(in.items, content.From(content.Provenance{Kind: k.kind, Origin: k.origin, Server: k.server, ID: itemID(len(in.items))}, p.Text))
 		}
 	}
 	for _, c := range s.Run.Calls {

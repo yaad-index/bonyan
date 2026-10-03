@@ -201,6 +201,7 @@ func excludesMemory(run record.Run) bool {
 type recordedResult struct {
 	text    string
 	kind    content.Kind
+	server  string
 	failure string // the recorded failure's kind, or "" for a result
 	known   bool   // whether the recording holds an answer for the call
 }
@@ -216,10 +217,11 @@ type replayTools struct {
 	mu      sync.Mutex
 	byKey   map[string][]recordedResult
 	kinds   map[string]content.Kind
+	servers map[string]string
 }
 
 func newReplayTools(run record.Run, live agent.Tools, liveSet map[string]bool) *replayTools {
-	t := &replayTools{live: live, liveSet: liveSet, byKey: map[string][]recordedResult{}, kinds: map[string]content.Kind{}}
+	t := &replayTools{live: live, liveSet: liveSet, byKey: map[string][]recordedResult{}, kinds: map[string]content.Kind{}, servers: map[string]string{}}
 	failures := map[string]string{}
 	for _, e := range run.Events {
 		if e.Slot == record.SlotTool && e.Call != "" {
@@ -243,7 +245,7 @@ func newReplayTools(run record.Run, live agent.Tools, liveSet map[string]bool) *
 			for _, p := range m.Parts {
 				for _, it := range append([]record.Part{p}, p.Items...) {
 					if it.Provenance != nil && it.Provenance.ID == m.ToolCallID && !it.Excluded {
-						results[m.ToolCallID] = recordedResult{text: it.Text, kind: it.Provenance.Kind, known: true}
+						results[m.ToolCallID] = recordedResult{text: it.Text, kind: it.Provenance.Kind, server: it.Provenance.Server, known: true}
 					}
 				}
 			}
@@ -258,7 +260,7 @@ func newReplayTools(run record.Run, live agent.Tools, liveSet map[string]bool) *
 			key := agent.CallKey(model.ToolCall{Name: tc.Name, Arguments: tc.Arguments})
 			t.byKey[key] = append(t.byKey[key], res)
 			if res.kind != "" {
-				t.kinds[tc.Name] = res.kind
+				t.kinds[tc.Name], t.servers[tc.Name] = res.kind, res.server
 			}
 		}
 	}
@@ -319,6 +321,16 @@ func (t *replayTools) Source(name string) content.Kind {
 		return t.live.Source(name)
 	}
 	return content.KindTool
+}
+
+// Server is the tool server the tool's results were recorded from, so the
+// trust policy classifies a replayed result under the server it classified
+// the original under. A live tool's server is its tools' answer now.
+func (t *replayTools) Server(name string) string {
+	if live, ok := t.live.(agent.Servers); ok && t.liveSet[name] {
+		return live.Server(name)
+	}
+	return t.servers[name]
 }
 
 // NeedsApproval is the agent's tools' answer: a re-run needs approval wherever

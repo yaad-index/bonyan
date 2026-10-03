@@ -173,3 +173,80 @@ func TestThePolicysHandlingCanRefuseTheRequest(t *testing.T) {
 	assert.ErrorIs(t, rep.Err, registry.ErrRefused)
 	assert.Empty(t, m.reqs, "nothing is sent")
 }
+
+// trustServer trusts remote tool output from the one server it names.
+type trustServer string
+
+func (p trustServer) Classify(_ context.Context, src content.Provenance) (trust.Decision, error) {
+	if src.Kind == content.KindRemoteTool && src.Server == string(p) {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// servedTools serves its tools from the remote server it names.
+type servedTools struct {
+	*tools
+	server string
+}
+
+func (s servedTools) Server(string) string { return s.server }
+
+// A remote tool's result names its server, so a policy can trust one server
+// and not another. Tools that name no server give results no policy trusting a
+// named server trusts.
+func TestAPolicyCanTrustOneServer(t *testing.T) {
+	remote := func() *tools {
+		return &tools{out: map[string]string{"search": "found it"}, remote: map[string]bool{"search": true}}
+	}
+	for name, tc := range map[string]struct {
+		tools   agent.Tools
+		server  string
+		trusted bool
+	}{
+		"the trusted server": {servedTools{remote(), "docs"}, "docs", true},
+		"another server":     {servedTools{remote(), "web"}, "web", false},
+		"no server named":    {remote(), "", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &scripted{steps: stepsOf(toolCall("search", `{}`), answer("done"))}
+			sink := &eventSink{}
+			a := newAgent(agent.Model{Name: "main", Chat: m})
+			a.Trust = trustServer("docs")
+			a.Tools = tc.tools
+			c := withHooks(t, &a, sink, nil, nil)
+			a.Recorder = c.Recorder
+			_, _, err := agent.Run(context.Background(), a, input("go"))
+			require.NoError(t, err)
+
+			result := m.reqs[1].Messages[3]
+			require.Equal(t, model.RoleTool, result.Role)
+			assert.Equal(t, tc.trusted, result.Parts[0].Trusted())
+			var decided []string
+			for _, e := range sink.events {
+				if e.Slot == registry.SlotTrust && e.Source == string(content.KindRemoteTool) {
+					decided = append(decided, e.Server+" "+e.Decision)
+				}
+			}
+			want := "untrusted"
+			if tc.trusted {
+				want = "trusted"
+			}
+			assert.Equal(t, []string{tc.server + " " + want}, decided, "the decision is recorded with the server")
+		})
+	}
+}
+
+// A program's own tool never carries a server name, even from Tools that
+// name servers.
+func TestAProgramsToolNamesNoServer(t *testing.T) {
+	m := &scripted{steps: stepsOf(toolCall("search", `{}`), answer("done"))}
+	a := newAgent(agent.Model{Name: "main", Chat: m})
+	a.Trust = trustServer("docs")
+	a.Tools = servedTools{&tools{out: map[string]string{"search": "found it"}}, "docs"}
+	_, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	it, ok := item(m.reqs[1].Messages[3].Parts[0])
+	require.True(t, ok, "untrusted")
+	assert.Equal(t, content.Provenance{Kind: content.KindTool, ID: it.Provenance().ID}, it.Provenance())
+}

@@ -319,14 +319,14 @@ func (r redactor) part(p content.Text) Part {
 		}
 		// Text the policy declared trusted keeps its provenance, and memory
 		// is excluded whether trusted or not.
-		prov := Provenance{Kind: p.Kind, Origin: p.Origin, ID: p.ID}
+		prov := Provenance{Kind: p.Kind, Origin: p.Origin, Server: p.Server, ID: p.ID}
 		if prov.Kind == content.KindMemory && !r.full {
 			return Part{Trusted: true, Provenance: &prov, Excluded: true}
 		}
 		return Part{Trusted: true, Text: r.text(v.String()), Provenance: &prov}
 	case content.Untrusted:
 		p := v.Provenance()
-		prov := Provenance{Kind: p.Kind, Origin: p.Origin, ID: p.ID}
+		prov := Provenance{Kind: p.Kind, Origin: p.Origin, Server: p.Server, ID: p.ID}
 		if prov.Kind == content.KindMemory && !r.full {
 			return Part{Provenance: &prov, Excluded: true}
 		}
