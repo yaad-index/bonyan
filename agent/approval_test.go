@@ -513,3 +513,55 @@ func TestAnActionTheStoreCannotHoldIsCancelled(t *testing.T) {
 	assert.Empty(t, tl.calls)
 	assert.Equal(t, []string{"a:cancelled", "b:cancelled"}, approvals(sink))
 }
+
+// givingUp is a store that delivers the first decision made on an action,
+// then closes the channel: it gives the action up.
+type givingUp struct{ approval.Store }
+
+func (g givingUp) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
+	inner, err := g.Store.Hold(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan approval.Decision, 1)
+	go func() {
+		defer close(out)
+		select {
+		case d := <-inner:
+			out <- d
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
+}
+
+// A store that gives an action up, closing its channel, ends the wait at
+// once, with no approval timeout to end it: the action is cancelled for each
+// approver that had not decided, and no longer held.
+func TestAStoreGivingAnActionUpCancelsIt(t *testing.T) {
+	sink := &eventSink{}
+	store := approval.NewMemory()
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Pending), answers(hook.Pending))
+	a.Approvals = givingUp{store}
+	listed := decideInTurn(t, store, approve("b"))
+	type result struct {
+		out agent.Outcome
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, _, err := agent.Run(context.Background(), a, input("go"))
+		done <- result{out, err}
+	}()
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the run kept waiting on a closed channel")
+	}
+	require.NoError(t, got.err)
+	assert.Equal(t, agent.ReasonNotApproved, got.out.Reason())
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"b:approved", "a:cancelled", "c:cancelled"}, approvals(sink))
+	require.ErrorIs(t, store.Decide(context.Background(), (<-listed).ID, "a", true), approval.ErrUnknown, "no longer held")
+}

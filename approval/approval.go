@@ -56,7 +56,9 @@ type Store interface {
 	// buffered for every approver. Holding an action the store holds already,
 	// for the same tool and approvers, adds a waiter for the same decisions,
 	// which is how a run resumed after a restart waits on its action again
-	// and keeps the decisions made (ADR 0001 §7).
+	// and keeps the decisions made (ADR 0001 §7). A store may close the
+	// channel to give the action up: a run waiting on it then cancels the
+	// action, recorded as cancelled for each approver that had not decided.
 	Hold(ctx context.Context, p Pending) (<-chan Decision, error)
 	// Decide records by's decision on the action id, for every waiter. It
 	// returns ErrUnknown when the store does not hold the action or when by

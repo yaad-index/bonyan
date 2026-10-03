@@ -932,8 +932,8 @@ func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.Appr
 }
 
 // await waits on the pending action p, held under its approval ID, until
-// every approver that said pending decided, one of them denied it, or its
-// time passed. held runs once the action is held. A run that was saved marks
+// every approver that said pending decided, one of them denied it, its time
+// passed, or the store gave it up. held runs once the action is held. A run that was saved marks
 // its action proceeding before going on with the decision; when another
 // process resumed the run first, it gives up instead, so the action never
 // runs twice.
@@ -957,9 +957,15 @@ func (r *run) await(ctx context.Context, call model.ToolCall, p pending, held fu
 	answer := hook.Abstain
 	// A time already past wins over a decision already made, which select
 	// alone would pick at random.
-	for answer == hook.Abstain && len(undecided) > 0 && wait.Err() == nil {
+	closed := false
+	for answer == hook.Abstain && len(undecided) > 0 && !closed && wait.Err() == nil {
 		select {
-		case d := <-decisions:
+		case d, ok := <-decisions:
+			if !ok {
+				// The store gave the action up.
+				closed = true
+				continue
+			}
 			i := slices.Index(undecided, d.By)
 			if i < 0 {
 				continue
@@ -980,7 +986,11 @@ func (r *run) await(ctx context.Context, call model.ToolCall, p pending, held fu
 		// as unknown rather than applied to an action that will not run.
 		_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), p.Approval)
 		r.recordMade(ctx, made)
-		r.recordEach(ctx, undecided, registry.DecisionTimedOut)
+		if closed {
+			r.recordEach(ctx, undecided, registry.DecisionCancelled)
+		} else {
+			r.recordEach(ctx, undecided, registry.DecisionTimedOut)
+		}
 		return hook.Abstain
 	}
 	if err := r.proceed(ctx); err != nil {
