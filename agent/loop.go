@@ -370,7 +370,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		message = v.Event.Message
 	}
 	r.useMemory(ctx, input.Provenance(), textOf(message))
-	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{inSection(labelUser, message)}}}
+	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{inSection(SectionUserMessage, message)}}}
 	var tools []model.ToolDef
 	if r.a.Tools != nil {
 		tools = r.a.Tools.Definitions()
@@ -533,10 +533,11 @@ func CallKey(tc model.ToolCall) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// The labels of the sections the loop builds.
+// The labels of the sections the loop builds. SectionUserMessage holds the
+// run's message, so a recording's reader can find it.
 const (
-	labelUser   = "user message"
-	labelResult = "tool result"
+	SectionUserMessage = "user message"
+	labelResult        = "tool result"
 )
 
 // record records ev, when the run is recorded.

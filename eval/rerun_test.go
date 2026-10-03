@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -551,4 +552,68 @@ func TestAGridComparesPromptVersions(t *testing.T) {
 		systems = append(systems, req.Messages[0].Parts[0].(content.Trusted).String())
 	}
 	assert.Equal(t, []string{"be brief", "be brief", "be very brief", "be very brief"}, systems)
+}
+
+// A re-run sends the recorded run's own message, with its source, and not the
+// material or the earlier conversation placed before it, whether the trust
+// policy left the message untrusted or declared it trusted. This pins the
+// layout the message is found by: if context assembly put anything after
+// this run's message, or the loop stopped labelling its section, the re-run
+// would send something else or refuse, and this test fails.
+func TestTheRunsMessageIsFound(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy trust.Policy
+	}{
+		{"untrusted", nil},
+		{"trusted by the policy", trustOnly(content.KindFetched)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
+			a.Trust = tc.policy
+			a.Material = []content.Untrusted{content.From(content.Provenance{Kind: content.KindFetched, ID: "doc"}, "MATERIAL-7d1")}
+			a.History = []model.Message{{Role: model.RoleUser, Parts: []content.Text{content.From(content.Provenance{Kind: content.KindUser, ID: "m0"}, "EARLIER-7d1")}}}
+			f, err := record.OpenFile(record.FileOptions{Dir: t.TempDir()})
+			require.NoError(t, err)
+			a.Recorder, err = record.NewRecorder(f, secret.NewScrubber())
+			require.NoError(t, err)
+			mail := content.From(content.Provenance{Kind: content.KindFetched, ID: "mail-1"}, "find x")
+			_, _, err = agent.Run(context.Background(), a, mail)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+			raw, err := os.ReadFile(f.Path())
+			require.NoError(t, err)
+			_, runs, err := record.ReadRuns(bytes.NewReader(raw))
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			first := runs[0].Calls[0].Request.Messages
+			assert.Equal(t, tc.policy != nil, first[len(first)-1].Parts[0].Trusted, "recorded in the form under test")
+
+			m := &searchThenAnswer{args: `{"q":"x"}`}
+			b := searchAgent(m, &liveTools{out: "r"})
+			_, err = eval.Rerun{Agent: b, Evaluators: all}.Run(context.Background(), runs[0])
+			require.NoError(t, err)
+			require.NotEmpty(t, m.reqs)
+			msgs := m.reqs[0].Messages
+			require.Len(t, msgs, 2, "the instructions and the run's message, nothing else")
+			items := mustSection(t, msgs[1])
+			require.Len(t, items, 1)
+			assert.Equal(t, "find x", items[0].Raw())
+			assert.Equal(t, content.Provenance{Kind: content.KindFetched, ID: "mail-1"}, items[0].Provenance(), "with its own source")
+		})
+	}
+}
+
+// mustSection is the items of the one section m holds.
+func mustSection(t *testing.T, m model.Message) []content.Untrusted {
+	t.Helper()
+	require.Len(t, m.Parts, 1)
+	switch v := m.Parts[0].(type) {
+	case content.Section:
+		return v.Items()
+	case content.Marked:
+		return v.Section().Items()
+	}
+	require.Failf(t, "not a section", "%T", m.Parts[0])
+	return nil
 }

@@ -84,7 +84,7 @@ func (r Rerun) Run(ctx context.Context, recorded record.Run) (RerunReport, error
 		return RerunReport{}, errors.New("eval: Times must not be negative")
 	}
 	times := max(r.Times, 1)
-	input, err := recordedInput(recorded)
+	input, err := runInput(recorded)
 	if err != nil {
 		return RerunReport{}, err
 	}
@@ -171,30 +171,6 @@ func runRecorded(ctx context.Context, a agent.Agent, input content.Untrusted, ev
 	answer, answered := out.Answer()
 	scores, failed := score.Evaluate(ctx, score.Subject{Run: runs[0], Answer: answer, Answered: answered}, evaluators...)
 	return Result{Outcome: out, Report: report, Scores: scores, Failed: failed}, nil
-}
-
-// recordedInput is the user's message the recorded run started from, as the
-// untrusted text it was, with its source.
-func recordedInput(run record.Run) (content.Untrusted, error) {
-	for _, c := range run.Calls {
-		if c.Kind != record.KindChat || c.Request == nil {
-			continue
-		}
-		for _, m := range c.Request.Messages {
-			if m.Role != model.RoleUser {
-				continue
-			}
-			for _, p := range m.Parts {
-				for _, it := range append([]record.Part{p}, p.Items...) {
-					if it.Provenance != nil && it.Provenance.Kind != content.KindMemory && it.Text != "" && !it.Excluded {
-						return content.From(content.Provenance{Kind: it.Provenance.Kind, ID: it.Provenance.ID}, it.Text), nil
-					}
-				}
-			}
-		}
-		break
-	}
-	return content.Untrusted{}, errors.New("eval: the recorded run holds no user message to run again")
 }
 
 // excludesMemory reports whether any recorded request left memory out.
