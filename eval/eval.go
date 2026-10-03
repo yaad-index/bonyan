@@ -1,9 +1,12 @@
 // Package eval scores an agent's runs (ADR 0001 §8). An evaluator
-// (score.Evaluator) reads one run's recording and returns scores; the
-// evaluators here are the deterministic ones: Loops, Waste and Outcome. A Runner runs an agent on a
-// set of cases and reports the scores per case and in aggregate, and
+// (score.Evaluator) reads one run's recording and returns scores. Loops, Waste
+// and Outcome are deterministic; Groundedness and UnusedContext ask a judge,
+// an agent the program configures, and their scores are reported beside the
+// judge's agreement with hand labels. A Runner runs an agent on a set of
+// cases and reports the scores per case and in aggregate, and
 // EvaluateRecording scores the runs of a recording already written. Register
-// puts the evaluators here in a registry, so configuration can name them.
+// puts the deterministic evaluators in a registry, so configuration can name
+// them; a judge is an agent, so the model-based ones are built in code.
 //
 // A score never carries a run's content: it is a number, under a metric's name
 // that the evaluator or the program's case chose. Switching an evaluator off

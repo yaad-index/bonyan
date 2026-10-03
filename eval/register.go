@@ -13,7 +13,8 @@ import (
 // Register registers the evaluators this package ships in r, under their
 // names: "loops" with the options {"threshold": n}, "waste" with
 // {"prices": {"<model>": {"input": n, "output": n}}}, and "outcome", which
-// takes none.
+// takes none. Groundedness and UnusedContext need a judge agent and are built
+// in code.
 func Register(r *registry.Registry) error {
 	return errors.Join(
 		r.RegisterEvaluator(Loops{}.Name(), func(options json.RawMessage) (score.Evaluator, error) {

@@ -203,6 +203,10 @@ type Report struct {
 	Steps  int
 	Tokens int64
 	Cost   int64
+	// Trimmed says some item was left out of at least one call's context
+	// because its section's budget was spent (ADR 0001 §3); the recording
+	// says which.
+	Trimmed bool
 	// Err is the error behind a not-cleared outcome, when there was one.
 	Err error
 }
@@ -307,6 +311,7 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
 	out, rep := r.loop(ctx, limits.MaxSteps, input)
 	rep.Tokens, rep.Cost = meter.Spent()
+	rep.Trimmed = r.trimmed
 	ended := "cleared"
 	if !out.Cleared() {
 		ended = string(out.Reason())
@@ -331,6 +336,8 @@ type run struct {
 	policy    trust.Policy
 	history   []model.Message
 	material  []content.Text
+	// trimmed is set once a call's context left an item out.
+	trimmed bool
 	// approveAll is set once the policy's handling required approval: every
 	// tool call from then on needs it.
 	approveAll      bool
@@ -551,6 +558,7 @@ func (r *run) record(ctx context.Context, ev record.Event) {
 // source and size. assemble never reports a memory item's ID.
 func (r *run) recordDropped(ctx context.Context, dropped []assemble.Dropped) {
 	for _, d := range dropped {
+		r.trimmed = true
 		r.record(ctx, record.Event{
 			Slot: "assemble", Name: d.Section, Decision: "dropped",
 			Source: string(d.Source.Kind), Item: d.Source.ID, Tokens: d.Tokens,

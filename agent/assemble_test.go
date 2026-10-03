@@ -33,9 +33,10 @@ func TestEachRequestIsAssembled(t *testing.T) {
 	c := withHooks(t, &a, sink, nil, nil)
 	a.Recorder = c.Recorder
 
-	out, _, err := agent.Run(context.Background(), a, input("now"))
+	out, rep, err := agent.Run(context.Background(), a, input("now"))
 	require.NoError(t, err)
 	require.True(t, out.Cleared(), out.String())
+	assert.True(t, rep.Trimmed, "the report says something was left out")
 
 	msgs := m.reqs[0].Messages
 	require.Len(t, msgs, 4, "system, material, the recent earlier turn, this run's message")
@@ -55,6 +56,12 @@ func TestEachRequestIsAssembled(t *testing.T) {
 	assert.Equal(t, string(content.KindUser), drops[0].Source)
 	assert.Equal(t, "m0", drops[0].Item)
 	assert.Greater(t, drops[0].Tokens, int64(800), "it counted at least its 800 bytes")
+
+	a.Context.History = assemble.DefaultBudgets().History
+	a.Models[0].Chat = &scripted{steps: stepsOf(answer("done"))}
+	_, rep, err = agent.Run(context.Background(), a, input("now"))
+	require.NoError(t, err)
+	assert.False(t, rep.Trimmed, "everything fit")
 }
 
 // This run's turns are never dropped: when they no longer fit, the run ends
