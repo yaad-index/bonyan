@@ -65,6 +65,9 @@ type entry struct {
 	spec   Spec
 	schema Schema
 	source content.Kind
+	// server is the name the program registered a tool server under, for a
+	// tool it serves.
+	server string
 	call   func(ctx context.Context, args []byte, secrets *secret.Scoped) (string, error)
 }
 
@@ -139,9 +142,10 @@ func RegisterSchema(r *Registry, name string, spec Spec, schema Schema, fn RawFu
 	})
 }
 
-// registerRemote adds a tool served by a tool server: its results are remote
-// tool output, it resolves no secrets and it may reach the network.
-func registerRemote(reg any, name, description string, schema json.RawMessage, needsApproval bool, call remote.Call) error {
+// registerRemote adds a tool served by the tool server registered as server:
+// its results are remote tool output from that server, it resolves no secrets
+// and it may reach the network.
+func registerRemote(reg any, server, name, description string, schema json.RawMessage, needsApproval bool, call remote.Call) error {
 	r, ok := reg.(*Registry)
 	if !ok || r == nil {
 		return errors.New("tool: not a registry")
@@ -162,6 +166,7 @@ func registerRemote(reg any, name, description string, schema json.RawMessage, n
 		spec:   spec,
 		schema: s,
 		source: content.KindRemoteTool,
+		server: server,
 		call: func(ctx context.Context, args []byte, _ *secret.Scoped) (string, error) {
 			return call(ctx, args)
 		},
@@ -199,6 +204,18 @@ func (r *Registry) Spec(name string) (Spec, bool) {
 		return Spec{}, false
 	}
 	return e.spec, true
+}
+
+// Server is the name of the tool server that serves the tool registered under
+// name, as the program registered the server; it is empty for a tool no
+// server serves and for a name no tool is registered under.
+func (r *Registry) Server(name string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if e, ok := r.tools[name]; ok {
+		return e.server
+	}
+	return ""
 }
 
 // Source is the source kind of the results of the tool registered under name:

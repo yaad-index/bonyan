@@ -617,3 +617,65 @@ func mustSection(t *testing.T, m model.Message) []content.Untrusted {
 	require.Failf(t, "not a section", "%T", m.Parts[0])
 	return nil
 }
+
+// servedTools is liveTools served from the remote server it names.
+type servedTools struct {
+	*liveTools
+	server string
+}
+
+func (s servedTools) Server(string) string { return s.server }
+
+// trustServer trusts remote tool output from the one server it names.
+type trustServer string
+
+func (p trustServer) Classify(_ context.Context, src content.Provenance) (trust.Decision, error) {
+	if src.Kind == content.KindRemoteTool && src.Server == string(p) {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// A replayed result keeps the server it was recorded from, whatever the
+// agent's tools name now; a live tool's result names its server now.
+func TestAReplayedResultKeepsItsServer(t *testing.T) {
+	orig := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, servedTools{&liveTools{out: "r", kind: content.KindRemoteTool}, "docs"})
+	orig.Trust = trustServer("docs")
+	run := recorded(t, orig, "find x")
+	var recorded []string
+	for _, c := range run.Calls {
+		for _, msg := range c.Request.Messages {
+			for _, p := range msg.Parts {
+				for _, it := range append([]record.Part{p}, p.Items...) {
+					if it.Provenance != nil && it.Provenance.Kind == content.KindRemoteTool {
+						recorded = append(recorded, it.Provenance.Server)
+					}
+				}
+			}
+		}
+	}
+	assert.Equal(t, []string{"docs"}, recorded, "the recording names the server")
+
+	for name, tc := range map[string]struct {
+		tools   agent.Tools
+		live    []string
+		trusted bool
+	}{
+		"replayed, tools naming another server": {servedTools{&liveTools{out: "LIVE", kind: content.KindRemoteTool}, "web"}, nil, true},
+		"replayed, tools naming none":           {&liveTools{out: "LIVE", kind: content.KindRemoteTool}, nil, true},
+		"live, from another server":             {servedTools{&liveTools{out: "LIVE", kind: content.KindRemoteTool}, "web"}, []string{"search"}, false},
+		"live, from the trusted server":         {servedTools{&liveTools{out: "LIVE", kind: content.KindRemoteTool}, "docs"}, []string{"search"}, true},
+		"live, from tools naming none":          {&liveTools{out: "LIVE", kind: content.KindRemoteTool}, []string{"search"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := &searchThenAnswer{args: `{"q":"x"}`}
+			a := searchAgent(m, tc.tools)
+			a.Trust = trustServer("docs")
+			_, err := eval.Rerun{Agent: a, LiveTools: tc.live}.Run(context.Background(), run)
+			require.NoError(t, err)
+			last := m.reqs[1].Messages[len(m.reqs[1].Messages)-1]
+			_, trusted := last.Parts[0].(content.Trusted)
+			assert.Equal(t, tc.trusted, trusted)
+		})
+	}
+}

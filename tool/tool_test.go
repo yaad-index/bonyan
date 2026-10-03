@@ -322,3 +322,10 @@ func TestNeedsApprovalFollowsTheSpec(t *testing.T) {
 	assert.False(t, r.NeedsApproval("open"))
 	assert.False(t, r.NeedsApproval("missing"))
 }
+
+// A program's own tool is served by no tool server.
+func TestAProgramsToolHasNoServer(t *testing.T) {
+	r, _ := newRegistry(t)
+	assert.Equal(t, content.KindTool, r.Source("weather"))
+	assert.Empty(t, r.Server("weather"))
+}

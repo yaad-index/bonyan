@@ -69,6 +69,7 @@ func (g guardedPolicy) Classify(ctx context.Context, source content.Provenance) 
 		Slot:     SlotTrust,
 		Name:     g.name,
 		Source:   string(source.Kind),
+		Server:   source.Server,
 		Decision: d.Verdict.String(),
 		Failure:  string(failure),
 	})

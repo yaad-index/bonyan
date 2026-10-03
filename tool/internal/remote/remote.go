@@ -12,7 +12,7 @@ import (
 // against the tool's schema.
 type Call func(ctx context.Context, args json.RawMessage) (string, error)
 
-// Register adds a tool served by a tool server to reg, which must be a
-// *tool.Registry. Package tool sets it.
+// Register adds a tool served by the tool server the program registered as
+// server to reg, which must be a *tool.Registry. Package tool sets it.
 // needsApproval makes every call of the tool wait for approval.
-var Register func(reg any, name, description string, schema json.RawMessage, needsApproval bool, call Call) error
+var Register func(reg any, server, name, description string, schema json.RawMessage, needsApproval bool, call Call) error

@@ -38,7 +38,9 @@ var ErrInputRequired = errors.New("mcpclient: the server asked for input")
 type Options struct {
 	// Prefix is put before each tool's name, joined by an underscore, so tools
 	// from different servers cannot collide. It is required, and it is chosen
-	// by the program rather than taken from the server.
+	// by the program rather than taken from the server. It is also the server's
+	// name in the source of its tools' results, which a trust policy can
+	// classify by (ADR 0001 §3).
 	Prefix string
 	// KeepServerText keeps the text Register drops by default: the tool's
 	// description and every schema keyword validation does not use. Setting it
@@ -110,7 +112,7 @@ func Register(ctx context.Context, reg *tool.Registry, session *mcp.ClientSessio
 			}
 			return resultText(res)
 		}
-		if err := remote.Register(reg, p.name, p.description, p.schema, opts.NeedsApproval, call); err != nil {
+		if err := remote.Register(reg, opts.Prefix, p.name, p.description, p.schema, opts.NeedsApproval, call); err != nil {
 			return names, err
 		}
 		names = append(names, p.name)

@@ -85,6 +85,8 @@ func TestRegisteredToolsAreListedAndCalledUnderThePrefix(t *testing.T) {
 	assert.Equal(t, "hello", out)
 	assert.Equal(t, int32(1), calls.Load())
 	assert.Equal(t, content.KindRemoteTool, reg.Source("srv_echo"))
+	assert.Equal(t, "srv", reg.Server("srv_echo"), "the server is named by the program's prefix")
+	assert.Empty(t, reg.Server("nothing"), "no tool, no server")
 	spec, ok := reg.Spec("srv_echo")
 	require.True(t, ok)
 	assert.True(t, spec.Network)
