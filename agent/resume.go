@@ -34,7 +34,7 @@ var (
 )
 
 // savedVersion is the version of the saved state's format.
-const savedVersion = 1
+const savedVersion = 2
 
 // suspension is what a run knows about its saved state.
 type suspension struct {
@@ -58,8 +58,9 @@ type pending struct {
 	Index int `json:"index"`
 	// Call is the action as approval was asked for it: what runs.
 	Call call `json:"call"`
-	// By is the hook that said the decision is pending.
-	By string `json:"by,omitempty"`
+	// Approvers are the hooks that said the decision is pending, each of
+	// which decides on its own.
+	Approvers []string `json:"approvers"`
 	// Until is when the approval timeout ends; zero for none.
 	Until time.Time `json:"until"`
 }

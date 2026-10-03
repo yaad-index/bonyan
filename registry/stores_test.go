@@ -46,7 +46,7 @@ func TestTheStoresAreAssembled(t *testing.T) {
 	require.NotNil(t, c.Approvals)
 	require.NotNil(t, c.RunStore)
 	ctx := context.Background()
-	_, err = c.Approvals.Hold(ctx, approval.Pending{ID: "a1", Tool: "search"})
+	_, err = c.Approvals.Hold(ctx, approval.Pending{ID: "a1", Tool: "search", Approvers: []string{"a"}})
 	require.NoError(t, err)
 	require.NoError(t, c.RunStore.Save(ctx, saved("r1", "ana", time.Now()), ""))
 	assert.Equal(t, []string{"r1"}, runsHeld(t, c.RunStore))

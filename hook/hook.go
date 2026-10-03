@@ -106,7 +106,7 @@ const (
 	Abstain Answer = iota
 	Approve
 	Reject
-	Pending // the decision comes later, through the approval store
+	Pending // the approver decides later, under its own name, through the approval store
 )
 
 // Approver is a hook that answers at Approval. It approves or rejects the

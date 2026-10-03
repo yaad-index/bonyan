@@ -15,11 +15,11 @@ import (
 // survives a restart and that several processes on one machine can share. A
 // decision made while no process waits on the action is kept, and the next
 // process to hold the action receives it, which is how a run resumed after a
-// restart learns a decision made while it was down (ADR 0001 §7). A waiter
+// restart learns the decisions made while it was down (ADR 0001 §7). A waiter
 // sees a decision made by another process within PollEvery.
 //
-// A decided action stays in the directory, for a resumed run to receive,
-// until it is dropped or Purge removes it. It is for a local filesystem only:
+// An action stays in the directory, with its decisions, for a resumed run to
+// receive, until it is dropped or Purge removes it. It is for a local filesystem only:
 // its lock is not reliable on a network mount. It is built on unix systems
 // only.
 type Dir struct {
@@ -47,8 +47,8 @@ func OpenDir(path string) (*Dir, error) {
 type dirAction struct {
 	Pending Pending   `json:"pending"`
 	Held    time.Time `json:"held"`
-	// Decided is the decision, once made: true to approve.
-	Decided *bool `json:"decided,omitempty"`
+	// Made are the decisions made, in the order they were made.
+	Made []Decision `json:"made,omitempty"`
 }
 
 func (d *Dir) now() time.Time {
@@ -59,13 +59,13 @@ func (d *Dir) now() time.Time {
 }
 
 // Hold keeps p, or waits on it again when it is held already, and delivers
-// its decision when one is made, or at once when it was made already. The
+// each decision made already at once and each later one when it is made. The
 // waiter stops looking when ctx ends.
-func (d *Dir) Hold(ctx context.Context, p Pending) (<-chan bool, error) {
-	if p.ID == "" {
-		return nil, errors.New("approval: empty id")
+func (d *Dir) Hold(ctx context.Context, p Pending) (<-chan Decision, error) {
+	if err := check(p); err != nil {
+		return nil, err
 	}
-	var decided *bool
+	var made []Decision
 	err := d.d.Locked(func(tx dirstore.Tx) error {
 		var a dirAction
 		err := tx.Get(p.ID, &a)
@@ -74,27 +74,27 @@ func (d *Dir) Hold(ctx context.Context, p Pending) (<-chan bool, error) {
 			return tx.Put(p.ID, dirAction{Pending: p, Held: d.now()})
 		case err != nil:
 			return err
-		case a.Pending.Tool != p.Tool:
-			return fmt.Errorf("approval: %q is held for another tool", p.ID)
 		}
-		decided = a.Decided
-		return nil
+		made = a.Made
+		return same(a.Pending, p)
 	})
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan bool, 1)
-	if decided != nil {
-		ch <- *decided
-		return ch, nil
+	ch := make(chan Decision, len(p.Approvers))
+	for _, m := range made {
+		ch <- m
 	}
-	go d.watch(ctx, p.ID, ch)
+	if len(made) < len(p.Approvers) {
+		go d.watch(ctx, p.ID, len(made), ch)
+	}
 	return ch, nil
 }
 
-// watch delivers id's decision on ch once it is made, and stops when ctx ends
-// or the action is dropped.
-func (d *Dir) watch(ctx context.Context, id string, ch chan<- bool) {
+// watch delivers id's decisions after the first sent on ch as they are made,
+// and stops once every approver decided, or when ctx ends or the action is
+// dropped.
+func (d *Dir) watch(ctx context.Context, id string, sent int, ch chan<- Decision) {
 	every := d.PollEvery
 	if every <= 0 {
 		every = DefaultPollEvery
@@ -120,26 +120,33 @@ func (d *Dir) watch(ctx context.Context, id string, ch chan<- bool) {
 		switch {
 		case gone:
 			return
-		case err == nil && a.Decided != nil:
-			ch <- *a.Decided
+		case err != nil:
+			continue
+		}
+		for ; sent < len(a.Made); sent++ {
+			ch <- a.Made[sent]
+		}
+		if sent >= len(a.Pending.Approvers) {
 			return
 		}
 	}
 }
 
-// Decide decides id, once. It returns ErrUnknown for an action the store
-// does not hold or that was decided already.
-func (d *Dir) Decide(_ context.Context, id string, approve bool) error {
+// Decide records by's decision on id.
+func (d *Dir) Decide(_ context.Context, id, by string, approve bool) error {
 	return d.d.Locked(func(tx dirstore.Tx) error {
 		var a dirAction
 		err := tx.Get(id, &a)
 		switch {
-		case errors.Is(err, dirstore.ErrNotFound), err == nil && a.Decided != nil:
+		case errors.Is(err, dirstore.ErrNotFound):
 			return fmt.Errorf("%w: %q", ErrUnknown, id)
 		case err != nil:
 			return err
 		}
-		a.Decided = &approve
+		if err := decide(a.Pending, a.Made, by); err != nil {
+			return err
+		}
+		a.Made = append(a.Made, Decision{By: by, Approve: approve})
 		return tx.Put(id, a)
 	})
 }
@@ -149,13 +156,13 @@ func (d *Dir) Drop(_ context.Context, id string) error {
 	return d.d.Locked(func(tx dirstore.Tx) error { return tx.Delete(id) })
 }
 
-// List returns the actions waiting for a decision.
+// List returns the actions still waiting.
 func (d *Dir) List(context.Context) ([]Pending, error) {
 	var out []Pending
 	err := d.d.Locked(func(tx dirstore.Tx) error {
 		return d.each(tx, func(_ string, a dirAction) error {
-			if a.Decided == nil {
-				out = append(out, a.Pending)
+			if p, ok := waiting(a.Pending, a.Made); ok {
+				out = append(out, p)
 			}
 			return nil
 		})

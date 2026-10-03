@@ -87,7 +87,7 @@ func TestARunSurvivesACrash(t *testing.T) {
 	held, err := approvals.List(context.Background())
 	require.NoError(t, err)
 	require.Len(t, held, 1)
-	require.NoError(t, approvals.Decide(context.Background(), held[0].ID, true))
+	require.NoError(t, approvals.Decide(context.Background(), held[0].ID, "a", true))
 
 	id := list[0].Run
 	p := newProcess(t, runs, approvals, answer("done"))
@@ -123,7 +123,7 @@ func TestAMarkedActionSurvivesACrash(t *testing.T) {
 		list, _ := runs.List(context.Background())
 		return len(held) == 1 && len(list) == 1
 	}, 10*time.Second, 5*time.Millisecond)
-	require.NoError(t, approvals.Decide(context.Background(), held[0].ID, true))
+	require.NoError(t, approvals.Decide(context.Background(), held[0].ID, "a", true))
 	err = cmd.Wait()
 	var exit *exec.ExitError
 	require.ErrorAs(t, err, &exit)
@@ -136,4 +136,52 @@ func TestAMarkedActionSurvivesACrash(t *testing.T) {
 	_, _, err = agent.Resume(context.Background(), p.agent, list[0].Run)
 	require.ErrorIs(t, err, agent.ErrActionStarted)
 	assert.Empty(t, p.tools.calls)
+}
+
+// The process that gives a run up to a resume leaves the action held, so
+// the resumed run, polling a shared directory more slowly, still receives
+// the decisions and runs it.
+func TestAProcessGivingARunUpLeavesItsActionHeld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "approvals")
+	open := func(every time.Duration) *approval.Dir {
+		d, err := approval.OpenDir(path)
+		require.NoError(t, err)
+		d.PollEvery = every
+		return d
+	}
+	runs := runstore.NewMemory()
+	first := newProcess(t, runs, open(2*time.Millisecond), twoCalls, answer("first"))
+	firstDone := make(chan agent.Outcome, 1)
+	go func() {
+		out, _, _ := agent.Run(context.Background(), first.agent, input("find x"))
+		firstDone <- out
+	}()
+	require.Eventually(t, func() bool {
+		list, _ := runs.List(context.Background())
+		return len(list) == 1
+	}, 2*time.Second, 5*time.Millisecond)
+	list, err := runs.List(context.Background())
+	require.NoError(t, err)
+
+	second := newProcess(t, runs, nil, answer("second"))
+	held := make(chan string, 1)
+	second.agent.Approvals = attached{open(300 * time.Millisecond), held}
+	secondDone := make(chan agent.Outcome, 1)
+	go func() {
+		out, _, err := agent.Resume(context.Background(), second.agent, list[0].Run)
+		assert.NoError(t, err)
+		secondDone <- out
+	}()
+	aid := <-held
+	require.NoError(t, open(time.Hour).Decide(context.Background(), aid, "a", true))
+	assert.Equal(t, agent.ReasonNotApproved, (<-firstDone).Reason(), "the first gave the run up")
+	assert.Equal(t, []string{"a:cancelled"}, approvals(first.sink))
+	select {
+	case out := <-secondDone:
+		a, _ := out.Answer()
+		assert.Equal(t, "second", a)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the resumed run never received the decision")
+	}
+	assert.Equal(t, []string{"search"}, names(second.tools.calls))
 }

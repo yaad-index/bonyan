@@ -130,12 +130,12 @@ func (r *Registry) assembleStores(cfg Config, out *Components) error {
 // guardedApprovals is bonyan's wrapper around a configured approval store.
 type guardedApprovals struct{ inner approval.Store }
 
-func (g guardedApprovals) Hold(ctx context.Context, p approval.Pending) (<-chan bool, error) {
+func (g guardedApprovals) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
 	return g.inner.Hold(ctx, p)
 }
 
-func (g guardedApprovals) Decide(ctx context.Context, id string, approve bool) error {
-	return g.inner.Decide(ctx, id, approve)
+func (g guardedApprovals) Decide(ctx context.Context, id, by string, approve bool) error {
+	return g.inner.Decide(ctx, id, by, approve)
 }
 
 func (g guardedApprovals) Drop(ctx context.Context, id string) error { return g.inner.Drop(ctx, id) }

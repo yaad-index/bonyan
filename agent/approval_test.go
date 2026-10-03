@@ -180,7 +180,8 @@ func TestAPendingActionWaitsForTheDecision(t *testing.T) {
 					held, _ := store.List(context.Background())
 					if len(held) == 1 {
 						assert.Equal(t, "search", held[0].Tool)
-						assert.NoError(t, store.Decide(context.Background(), held[0].ID, approve))
+						assert.Equal(t, []string{"a"}, held[0].Approvers)
+						assert.NoError(t, store.Decide(context.Background(), held[0].ID, "a", approve))
 						return
 					}
 					time.Sleep(5 * time.Millisecond)
@@ -224,12 +225,12 @@ func TestAPendingActionTimesOut(t *testing.T) {
 // cancelled, and a late decision is unknown.
 func TestALateDecisionIsUnknown(t *testing.T) {
 	before := approval.NewMemory()
-	_, err := before.Hold(context.Background(), approval.Pending{ID: "a1", Tool: "search"})
+	_, err := before.Hold(context.Background(), approval.Pending{ID: "a1", Tool: "search", Approvers: []string{"a"}})
 	require.NoError(t, err)
 	after := approval.NewMemory() // the process restarted
-	require.ErrorIs(t, after.Decide(context.Background(), "a1", true), approval.ErrUnknown)
-	require.NoError(t, before.Decide(context.Background(), "a1", true))
-	require.ErrorIs(t, before.Decide(context.Background(), "a1", true), approval.ErrUnknown, "decided once only")
+	require.ErrorIs(t, after.Decide(context.Background(), "a1", "a", true), approval.ErrUnknown)
+	require.NoError(t, before.Decide(context.Background(), "a1", "a", true))
+	require.ErrorIs(t, before.Decide(context.Background(), "a1", "a", true), approval.ErrDecided, "decided once only")
 }
 
 // With no store, a pending answer cancels the action at once.
@@ -316,7 +317,7 @@ func TestAnApprovalWaitsForAPendingAnswer(t *testing.T) {
 				for {
 					held, _ := store.List(context.Background())
 					if len(held) == 1 {
-						assert.NoError(t, store.Decide(context.Background(), held[0].ID, approve))
+						assert.NoError(t, store.Decide(context.Background(), held[0].ID, "b", approve))
 						return
 					}
 					time.Sleep(5 * time.Millisecond)
@@ -333,4 +334,234 @@ func TestAnApprovalWaitsForAPendingAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// decideInTurn makes each decision in turn once the store holds one
+// action, and reports the action as the store listed it first.
+func decideInTurn(t *testing.T, store approval.Store, decisions ...approval.Decision) <-chan approval.Pending {
+	t.Helper()
+	listed := make(chan approval.Pending, 1)
+	go func() {
+		var held []approval.Pending
+		if !assert.Eventually(t, func() bool {
+			held, _ = store.List(context.Background())
+			return len(held) == 1
+		}, 2*time.Second, 2*time.Millisecond) {
+			return
+		}
+		listed <- held[0]
+		for _, d := range decisions {
+			assert.NoError(t, store.Decide(context.Background(), held[0].ID, d.By, d.Approve))
+		}
+	}()
+	return listed
+}
+
+func approve(by string) approval.Decision { return approval.Decision{By: by, Approve: true} }
+func deny(by string) approval.Decision    { return approval.Decision{By: by} }
+
+// Each approver that said pending decides on its own: the action waits for
+// all of them and runs only when none denied, and each decision is recorded
+// under its approver, in the order made (ADR 0001 §12).
+func TestEachPendingApproverDecides(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		decisions []approval.Decision
+		runs      bool
+		recorded  []string
+	}{
+		{"both approve", []approval.Decision{approve("c"), approve("a")}, true, []string{"c:approved", "a:approved"}},
+		{"the last denies", []approval.Decision{approve("a"), deny("c")}, false, []string{"a:approved", "c:denied"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sink := &eventSink{}
+			store := approval.NewMemory()
+			a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Approve), answers(hook.Pending))
+			a.Approvals = store
+			listed := decideInTurn(t, store, c.decisions...)
+			out, _, err := agent.Run(context.Background(), a, input("go"))
+			require.NoError(t, err)
+			assert.True(t, out.Cleared())
+			p := <-listed
+			assert.Equal(t, []string{"a", "c"}, p.Approvers, "the approvers that said pending, not the one that approved")
+			if c.runs {
+				assert.Len(t, tl.calls, 1)
+			} else {
+				assert.Empty(t, tl.calls)
+			}
+			assert.Equal(t, c.recorded, approvals(sink))
+			require.ErrorIs(t, store.Decide(context.Background(), p.ID, "a", true), approval.ErrUnknown, "no longer held")
+		})
+	}
+}
+
+// The first denial ends the wait at once, with no timeout to end it, and
+// the action is no longer held, so the other approver's decision is unknown.
+func TestTheFirstDenialEndsTheWait(t *testing.T) {
+	sink := &eventSink{}
+	store := approval.NewMemory()
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Pending))
+	a.Approvals = store
+	listed := decideInTurn(t, store, deny("b"))
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.True(t, out.Cleared(), "the model is told it was denied")
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"b:denied"}, approvals(sink))
+	require.ErrorIs(t, store.Decide(context.Background(), (<-listed).ID, "a", true), approval.ErrUnknown, "no longer held")
+}
+
+// One approval does not let the action through while another approver that
+// said pending has not decided: the timeout cancels it and records each
+// approver that had not decided.
+func TestAnUndecidedApproverTimesOut(t *testing.T) {
+	sink := &eventSink{}
+	store := approval.NewMemory()
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Pending), answers(hook.Pending))
+	a.Approvals = store
+	a.Limits = agent.DefaultLimits()
+	a.Limits.ApprovalTimeout = 200 * time.Millisecond
+	decideInTurn(t, store, approve("b"))
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"b:approved", "a:timed out", "c:timed out"}, approvals(sink))
+}
+
+// A decision under the name of a hook that did not say pending on the
+// action is refused as unknown and changes nothing.
+func TestADecisionFromAnotherNameIsUnknown(t *testing.T) {
+	store := approval.NewMemory()
+	a, _, tl := gated(t, nil, answers(hook.Approve), answers(hook.Pending))
+	a.Approvals = store
+	go func() {
+		var held []approval.Pending
+		if !assert.Eventually(t, func() bool {
+			held, _ = store.List(context.Background())
+			return len(held) == 1
+		}, 2*time.Second, 2*time.Millisecond) {
+			return
+		}
+		assert.ErrorIs(t, store.Decide(context.Background(), held[0].ID, "a", true), approval.ErrUnknown, "it approved at the point")
+		assert.ErrorIs(t, store.Decide(context.Background(), held[0].ID, "z", true), approval.ErrUnknown, "no such hook")
+		assert.NoError(t, store.Decide(context.Background(), held[0].ID, "b", false))
+	}()
+	_, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Empty(t, tl.calls)
+}
+
+// noisy is a store that delivers, before the real decisions, a decision
+// under a name the action did not hold and every real decision twice.
+type noisy struct{ approval.Store }
+
+func (n noisy) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
+	inner, err := n.Store.Hold(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan approval.Decision, 2*len(p.Approvers)+1)
+	out <- approve("z")
+	go func() {
+		for d := range inner {
+			out <- d
+			out <- d
+		}
+	}()
+	return out, nil
+}
+
+// The run counts only one decision from each approver it waits on, however
+// the store delivers them.
+func TestTheRunCountsEachApproverOnce(t *testing.T) {
+	sink := &eventSink{}
+	store := approval.NewMemory()
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Pending))
+	a.Approvals = noisy{store}
+	a.Limits = agent.DefaultLimits()
+	a.Limits.ApprovalTimeout = 200 * time.Millisecond
+	decideInTurn(t, store, approve("a"))
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonNotApproved, out.Reason(), "b never decided")
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"a:approved", "b:timed out"}, approvals(sink))
+}
+
+// With no store, a pending answer cancels the action at once, recorded for
+// each approver that said pending.
+func TestPendingWithNoStoreCancelsForEachApprover(t *testing.T) {
+	sink := &eventSink{}
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Abstain), answers(hook.Pending))
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"a:cancelled", "c:cancelled"}, approvals(sink))
+}
+
+// An action the store cannot hold is cancelled, recorded for each approver
+// that said pending.
+func TestAnActionTheStoreCannotHoldIsCancelled(t *testing.T) {
+	sink := &eventSink{}
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Pending))
+	a.Approvals = failingHold{approval.NewMemory()}
+	out, _, err := agent.Run(context.Background(), a, input("go"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"a:cancelled", "b:cancelled"}, approvals(sink))
+}
+
+// givingUp is a store that delivers the first decision made on an action,
+// then closes the channel: it gives the action up.
+type givingUp struct{ approval.Store }
+
+func (g givingUp) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
+	inner, err := g.Store.Hold(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan approval.Decision, 1)
+	go func() {
+		defer close(out)
+		select {
+		case d := <-inner:
+			out <- d
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
+}
+
+// A store that gives an action up, closing its channel, ends the wait at
+// once, with no approval timeout to end it: the action is cancelled for each
+// approver that had not decided, and no longer held.
+func TestAStoreGivingAnActionUpCancelsIt(t *testing.T) {
+	sink := &eventSink{}
+	store := approval.NewMemory()
+	a, _, tl := gated(t, sink, answers(hook.Pending), answers(hook.Pending), answers(hook.Pending))
+	a.Approvals = givingUp{store}
+	listed := decideInTurn(t, store, approve("b"))
+	type result struct {
+		out agent.Outcome
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, _, err := agent.Run(context.Background(), a, input("go"))
+		done <- result{out, err}
+	}()
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "the run kept waiting on a closed channel")
+	}
+	require.NoError(t, got.err)
+	assert.Equal(t, agent.ReasonNotApproved, got.out.Reason())
+	assert.Empty(t, tl.calls)
+	assert.Equal(t, []string{"b:approved", "a:cancelled", "c:cancelled"}, approvals(sink))
+	require.ErrorIs(t, store.Decide(context.Background(), (<-listed).ID, "a", true), approval.ErrUnknown, "no longer held")
 }
