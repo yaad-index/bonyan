@@ -60,6 +60,9 @@ type Start struct {
 	Evaluation bool `json:"evaluation,omitempty"`
 	// Prompt is the prompt the run's agent was given.
 	Prompt *PromptRef `json:"prompt,omitempty"`
+	// Resumed marks a run taken up again after a restart; its earlier start
+	// carries the same run.
+	Resumed bool `json:"resumed,omitempty"`
 }
 
 // PromptRef identifies a prompt by its ID, empty for unversioned

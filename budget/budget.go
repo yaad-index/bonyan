@@ -182,6 +182,23 @@ func (m *Meter) ChargeBound(modelName string, inputBound int64, maxOutput int) e
 	return m.Charge(modelName, &model.Usage{InputTokens: inputBound, OutputTokens: int64(maxOutput)})
 }
 
+// Carry adds what a run spent before it was suspended, when it is resumed
+// (ADR 0001 §7). Spending past the ceiling is reported as ErrExceeded, as by
+// Charge.
+func (m *Meter) Carry(tokens, costMicros int64) error {
+	if tokens < 0 || costMicros < 0 {
+		return fmt.Errorf("budget: negative spend carried, %d tokens and %d cost", tokens, costMicros)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokens = satAdd(m.tokens, tokens)
+	m.cost = satAdd(m.cost, costMicros)
+	if m.tokens > m.maxTokens || m.cost > m.maxCost {
+		return fmt.Errorf("%w: spent %d of %d tokens and %d of %d cost", ErrExceeded, m.tokens, m.maxTokens, m.cost, m.maxCost)
+	}
+	return nil
+}
+
 // Spent returns the tokens and cost charged so far.
 func (m *Meter) Spent() (tokens, costMicros int64) {
 	m.mu.Lock()
