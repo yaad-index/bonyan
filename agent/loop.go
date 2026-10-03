@@ -20,6 +20,7 @@ import (
 	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/registry"
+	"github.com/yaad-index/bonyan/runstore"
 	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/telemetry"
 	"github.com/yaad-index/bonyan/tokenize"
@@ -138,6 +139,11 @@ type Agent struct {
 	// until the program decides them through it; nil holds none, so a
 	// pending answer cancels the action at once.
 	Approvals approval.Store
+	// RunStore, when set, saves a run while an action waits on approval, so
+	// Resume can take it up after a restart (ADR 0001 §7); it needs Subject,
+	// and a durable Approvals for a decision made while the process was down
+	// to reach the resumed run. Nil saves nothing: a restart cancels the run.
+	RunStore runstore.Store
 	// Memory is the agent's memory (registry.Components.Memory); nil means
 	// none. At the start of a run the facts about Subject matching the user's
 	// message are recalled into the context, and the message is stored as an
@@ -229,25 +235,54 @@ type Report struct {
 // answering is a not-cleared Outcome with its reason, never a cleared one
 // (ADR 0001 §7). The error is only for an agent that cannot run at all.
 func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report, error) {
+	s, err := prepare(a)
+	if err != nil {
+		return Outcome{}, Report{}, err
+	}
+	deadline := time.Now().Add(s.limits.Deadline)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	r := s.start(ctx, newID(), deadline, false)
+	r.hooks.Run(r.ctx, hook.Event{Point: hook.RunStart})
+	out, rep := r.end(r.loop(r.ctx, s.limits.MaxSteps, input))
+	return out, rep, nil
+}
+
+// setup is what a run is built from, once its agent is checked.
+type setup struct {
+	a            Agent
+	limits       Limits
+	models       []model.Chat
+	meter        *budget.Meter
+	budgets      assemble.Budgets
+	counter      tokenize.Counter
+	scrub        *secret.Scrubber
+	threshold    int
+	instructions content.Trusted
+	ref          prompt.Ref
+}
+
+// prepare checks a and builds what its runs use.
+func prepare(a Agent) (*setup, error) {
 	limits := a.Limits
 	if limits == (Limits{}) {
 		limits = DefaultLimits()
 	}
 	if err := limits.Validate(); err != nil {
-		return Outcome{}, Report{}, err
+		return nil, err
 	}
 	if len(a.Models) == 0 {
-		return Outcome{}, Report{}, errors.New("agent: no model")
+		return nil, errors.New("agent: no model")
 	}
 	if a.MaxOutputTokens <= 0 {
-		return Outcome{}, Report{}, budget.ErrNoOutputCap
+		return nil, budget.ErrNoOutputCap
 	}
 	for _, m := range a.Models {
 		if m.Chat == nil {
-			return Outcome{}, Report{}, fmt.Errorf("agent: model %q has no implementation", m.Name)
+			return nil, fmt.Errorf("agent: model %q has no implementation", m.Name)
 		}
 		if _, err := a.Prices.Lookup(m.Name); err != nil {
-			return Outcome{}, Report{}, err
+			return nil, err
 		}
 	}
 	budgets := a.Context
@@ -255,33 +290,36 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 		budgets = assemble.DefaultBudgets()
 	}
 	if err := budgets.Validate(); err != nil {
-		return Outcome{}, Report{}, err
+		return nil, err
 	}
 	if err := validHistory(a.History); err != nil {
-		return Outcome{}, Report{}, err
+		return nil, err
 	}
 	if a.Memory != nil && a.Subject == "" {
-		return Outcome{}, Report{}, errors.New("agent: memory needs a subject")
+		return nil, errors.New("agent: memory needs a subject")
+	}
+	if a.RunStore != nil && a.Subject == "" {
+		return nil, errors.New("agent: a run store needs a subject")
 	}
 	if a.MemoryLimit < 0 {
-		return Outcome{}, Report{}, errors.New("agent: the memory limit must not be negative")
+		return nil, errors.New("agent: the memory limit must not be negative")
 	}
 	instructions, ref := a.Instructions, prompt.Unversioned(a.Instructions)
 	if a.Prompt != nil {
 		if a.Instructions.String() != "" {
-			return Outcome{}, Report{}, errors.New("agent: Instructions and Prompt are both set")
+			return nil, errors.New("agent: Instructions and Prompt are both set")
 		}
 		if err := a.Prompt.Validate(); err != nil {
-			return Outcome{}, Report{}, err
+			return nil, err
 		}
 		instructions, ref = a.Prompt.Instruction(), a.Prompt.Ref()
 	}
 	if a.Output != nil && (a.Output.Schema.IsZero() || a.Output.Retries < 0) {
-		return Outcome{}, Report{}, errors.New("agent: an output needs a schema and zero or more retries")
+		return nil, errors.New("agent: an output needs a schema and zero or more retries")
 	}
 	meter, err := budget.NewMeter(limits.Budget.MaxTokens, limits.Budget.MaxCostMicros, a.Prices)
 	if err != nil {
-		return Outcome{}, Report{}, err
+		return nil, err
 	}
 	counter := a.Counter
 	if counter == nil {
@@ -307,35 +345,46 @@ func Run(ctx context.Context, a Agent, input content.Untrusted) (Outcome, Report
 		c = a.Telemetry.Chat(c, m.Name, price, scrub.Scrub)
 		models[i] = model.Retry(budget.Chat(c, m.Name, meter, counter), a.Retry)
 	}
+	return &setup{a: a, limits: limits, models: models, meter: meter, budgets: budgets, counter: counter, scrub: scrub, threshold: threshold, instructions: instructions, ref: ref}, nil
+}
 
-	ctx, cancel := context.WithTimeout(ctx, limits.Deadline)
-	defer cancel()
+// start begins the run id, which ends at deadline: its span, its recording's
+// start and the run itself. resumed marks a run taken up again after a
+// restart.
+func (s *setup) start(ctx context.Context, id string, deadline time.Time, resumed bool) *run {
+	a := s.a
 	ctx, endRun := a.Telemetry.Run(ctx, a.Name)
-	ctx = record.WithRun(ctx, newID())
+	ctx = record.WithRun(ctx, id)
 	if a.Subject != "" {
 		ctx = record.WithSubject(ctx, a.Subject)
 	}
 	if a.Recorder != nil {
 		traceID, spanID := telemetry.SpanOf(ctx)
-		a.Recorder.Start(ctx, record.Start{Agent: a.Name, Trace: traceID, Span: spanID, Prompt: &record.PromptRef{ID: ref.ID, Hash: ref.Hash}})
+		a.Recorder.Start(ctx, record.Start{Agent: a.Name, Trace: traceID, Span: spanID, Prompt: &record.PromptRef{ID: s.ref.ID, Hash: s.ref.Hash}, Resumed: resumed})
 	}
-
-	r := run{a: a, models: models, scrub: scrub, hooks: a.Hooks, threshold: threshold, seen: map[string]int{}, budgets: budgets, counter: counter, approvalTimeout: limits.ApprovalTimeout, instructions: instructions, prompt: ref}
+	r := &run{a: a, models: s.models, scrub: s.scrub, hooks: a.Hooks, threshold: s.threshold, seen: map[string]int{}, budgets: s.budgets, counter: s.counter, approvalTimeout: s.limits.ApprovalTimeout, instructions: s.instructions, prompt: s.ref, meter: s.meter, ctx: ctx, endRun: endRun}
+	r.suspend.run, r.suspend.deadline = id, deadline
+	r.toolsHash, r.materialHash, r.historyHash = contentHashes(a)
 	r.policy = registry.GuardPolicy(a.Trust, a.Recorder)
-	r.hooks.Run(ctx, hook.Event{Point: hook.RunStart})
-	out, rep := r.loop(ctx, limits.MaxSteps, input)
-	rep.Tokens, rep.Cost = meter.Spent()
+	return r
+}
+
+// end ends the run with out: what it spent, the hooks at run end, its span,
+// its recording's end and its saved state.
+func (r *run) end(out Outcome, rep Report) (Outcome, Report) {
+	rep.Tokens, rep.Cost = r.meter.Spent()
 	rep.Trimmed = r.trimmed
 	ended := "cleared"
 	if !out.Cleared() {
 		ended = string(out.Reason())
 	}
-	r.hooks.Run(ctx, hook.Event{Point: hook.RunEnd, Outcome: ended})
-	endRun(ended, out.Cleared())
-	if a.Recorder != nil {
-		a.Recorder.End(ctx, record.End{Outcome: ended, Steps: rep.Steps, Tokens: rep.Tokens, Cost: rep.Cost})
+	r.hooks.Run(r.ctx, hook.Event{Point: hook.RunEnd, Outcome: ended})
+	r.endRun(ended, out.Cleared())
+	if r.a.Recorder != nil {
+		r.a.Recorder.End(r.ctx, record.End{Outcome: ended, Steps: rep.Steps, Tokens: rep.Tokens, Cost: rep.Cost})
 	}
-	return out, rep, nil
+	r.finish(r.ctx)
+	return out, rep
 }
 
 type run struct {
@@ -361,6 +410,22 @@ type run struct {
 	// agent's own model calls records of them.
 	instructions content.Trusted
 	prompt       prompt.Ref
+	// current are this run's turns so far, the user message first; step and
+	// retries are where the loop is; message is the user's message as the
+	// run took it, which a resumed run recalls memory with again.
+	current []model.Message
+	step    int
+	retries int
+	tools   []model.ToolDef
+	message string
+	// suspend is how the run is saved while an action waits on approval.
+	suspend suspension
+	meter   *budget.Meter
+	// ctx is the run's context, and endRun ends its span.
+	ctx    context.Context
+	endRun func(outcome string, cleared bool)
+	// The hashes a saved run is compared by when it is resumed.
+	toolsHash, materialHash, historyHash string
 }
 
 // validHistory refuses history the pipeline cannot place.
@@ -390,18 +455,23 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 	if len(v.Changed) > 0 {
 		message = v.Event.Message
 	}
-	r.useMemory(ctx, input.Provenance(), textOf(message))
-	current := []model.Message{{Role: model.RoleUser, Parts: []content.Text{inSection(SectionUserMessage, message)}}}
-	var tools []model.ToolDef
+	r.message = textOf(message)
+	r.useMemory(ctx, input.Provenance(), r.message)
+	r.current = []model.Message{{Role: model.RoleUser, Parts: []content.Text{inSection(SectionUserMessage, message)}}}
 	if r.a.Tools != nil {
-		tools = r.a.Tools.Definitions()
+		r.tools = r.a.Tools.Definitions()
 	}
+	return r.steps(ctx, maxSteps, 1, rep)
+}
 
-	retries := 0
+// steps runs the loop from step first on, with this run's turns so far in
+// r.current.
+func (r *run) steps(ctx context.Context, maxSteps, first int, rep Report) (Outcome, Report) {
 	endStep := func() {}
 	defer func() { endStep() }()
 	runCtx := ctx
-	for step := 1; step <= maxSteps; step++ {
+	for step := first; step <= maxSteps; step++ {
+		r.step = step
 		endStep()
 		var ctx context.Context
 		ctx, endStep = r.a.Telemetry.Step(runCtx, step)
@@ -415,8 +485,8 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			Memory:       r.memory,
 			Material:     r.material,
 			Earlier:      r.history,
-			Current:      current,
-			Tools:        tools,
+			Current:      r.current,
+			Tools:        r.tools,
 		}, r.budgets, r.counter)
 		if err != nil {
 			rep.Err = err
@@ -435,13 +505,13 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 		if len(resp.ToolCalls) == 0 {
 			answer := resp.Content
 			if err := r.checkOutput(answer); err != nil {
-				if retries >= r.a.Output.Retries {
+				if r.retries >= r.a.Output.Retries {
 					rep.Err = err
 					return NotCleared(ReasonInvalidOutput), rep
 				}
-				retries++
+				r.retries++
 				r.record(ctx, record.Event{Slot: record.SlotOutput, Decision: record.DecisionRetry})
-				current = append(current, retryMessage(err))
+				r.current = append(r.current, retryMessage(err))
 				continue
 			}
 			v := r.hooks.Run(ctx, hook.Event{Point: hook.Reply, Reply: answer})
@@ -460,25 +530,46 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 			return Answered(answer), rep
 		}
 
-		current = append(current, model.Message{Role: model.RoleAssistant, ToolCalls: resp.ToolCalls})
-		for _, tc := range resp.ToolCalls {
-			if r.looping(tc) {
-				rep.Err = fmt.Errorf("agent: tool call %q repeated %d times", tc.Name, r.threshold)
-				return NotCleared(ReasonLoopDetected), rep
-			}
-			msg, reason := r.runTool(ctx, tc)
-			switch reason {
-			case ReasonNotApproved:
-				rep.Err = fmt.Errorf("agent: tool call %q got no approval", tc.Name)
-				return NotCleared(reason), rep
-			case ReasonReplayMismatch:
-				rep.Err = fmt.Errorf("agent: tool call %q: %w", tc.Name, record.ErrMismatch)
-				return NotCleared(reason), rep
-			}
-			current = append(current, msg)
+		r.current = append(r.current, model.Message{Role: model.RoleAssistant, ToolCalls: resp.ToolCalls})
+		if reason := r.calls(ctx, resp.ToolCalls, 0, &rep); reason != ReasonUnset {
+			return NotCleared(reason), rep
 		}
 	}
 	return NotCleared(ReasonStepLimit), rep
+}
+
+// calls runs a step's tool calls from the one at index from, appending each
+// result to r.current, and returns the reason the run ends, if one does.
+func (r *run) calls(ctx context.Context, calls []model.ToolCall, from int, rep *Report) Reason {
+	for i := from; i < len(calls); i++ {
+		tc := calls[i]
+		if r.looping(tc) {
+			rep.Err = fmt.Errorf("agent: tool call %q repeated %d times", tc.Name, r.threshold)
+			return ReasonLoopDetected
+		}
+		msg, reason := r.runTool(ctx, tc, i)
+		if reason := r.ended(tc, reason, rep); reason != ReasonUnset {
+			return reason
+		}
+		r.current = append(r.current, msg)
+	}
+	return ReasonUnset
+}
+
+// ended reports the reason a tool call ends the run with, if it does.
+func (r *run) ended(tc model.ToolCall, reason Reason, rep *Report) Reason {
+	switch reason {
+	case ReasonNotApproved:
+		rep.Err = fmt.Errorf("agent: tool call %q got no approval", tc.Name)
+		if r.suspend.err != nil {
+			rep.Err = fmt.Errorf("agent: tool call %q: %w", tc.Name, r.suspend.err)
+		}
+		return reason
+	case ReasonReplayMismatch:
+		rep.Err = fmt.Errorf("agent: tool call %q: %w", tc.Name, record.ErrMismatch)
+		return reason
+	}
+	return ReasonUnset
 }
 
 // call asks each model in turn until one answers. A budget crossing, the
@@ -638,6 +729,16 @@ func (r *run) useMemory(ctx context.Context, from content.Provenance, message st
 	if r.a.Memory == nil {
 		return
 	}
+	r.recall(ctx, message)
+	r.storeEvent(ctx, from, message)
+}
+
+// recall recalls the facts about the run's subject that match message into
+// the run's context, through the memory recall hook point.
+func (r *run) recall(ctx context.Context, message string) {
+	if r.a.Memory == nil {
+		return
+	}
 	limit := r.a.MemoryLimit
 	if limit == 0 {
 		limit = DefaultMemoryLimit
@@ -655,7 +756,6 @@ func (r *run) useMemory(ctx context.Context, from content.Provenance, message st
 			r.memory = recalled
 		}
 	}
-	r.storeEvent(ctx, from, message)
 }
 
 // storeEvent stores text, which came from from, as an event of the run's
@@ -731,7 +831,7 @@ const (
 // deny it; hooks after it may change the result, and a failing one withholds
 // it. A call that got no approval, or that a replay of tools has no recorded
 // result for, ends the run with that reason.
-func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, Reason) {
+func (r *run) runTool(ctx context.Context, tc model.ToolCall, index int) (model.Message, Reason) {
 	v := r.hooks.Run(ctx, hook.Event{Point: hook.BeforeTool, Call: tc})
 	if v.Denied != "" {
 		r.toolFailed(ctx, tc, record.ToolDenied)
@@ -744,14 +844,28 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, Re
 	// Approval comes after the before-tool hooks, and nothing changes the
 	// call between it and the tool: what is approved is what runs.
 	if reason, needed := r.needsApproval(call); needed {
-		switch r.approve(ctx, call, reason) {
-		case hook.Reject:
-			r.toolFailed(ctx, call, record.ToolDenied)
-			return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), ""
-		case hook.Abstain:
-			return model.Message{}, ReasonNotApproved
-		}
+		return r.decided(ctx, tc, call, r.approve(ctx, call, reason, index))
 	}
+	return r.result(ctx, tc, call)
+}
+
+// decided goes on with call after the approval point's answer: a denied
+// call's result says so, an action no one decided ends the run, and an
+// approved one runs.
+func (r *run) decided(ctx context.Context, tc, call model.ToolCall, answer hook.Answer) (model.Message, Reason) {
+	switch answer {
+	case hook.Reject:
+		r.toolFailed(ctx, call, record.ToolDenied)
+		return toolMessage(tc.ID, toolText(tc.ID, resultDenied)), ""
+	case hook.Abstain:
+		return model.Message{}, ReasonNotApproved
+	}
+	return r.result(ctx, tc, call)
+}
+
+// result runs call, as tc asked for it after the hooks before it, and returns
+// the message carrying what it gave.
+func (r *run) result(ctx context.Context, tc, call model.ToolCall) (model.Message, Reason) {
 	text, failure := r.callTool(ctx, call)
 	ran := failure == ""
 	if !ran {
@@ -773,7 +887,7 @@ func (r *run) runTool(ctx context.Context, tc model.ToolCall) (model.Message, Re
 	if ran {
 		out = registry.Classify(ctx, r.policy, result)
 	}
-	v = r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool, Call: call, Result: result, Trusted: out.Trusted()})
+	v := r.hooks.Run(ctx, hook.Event{Point: hook.AfterTool, Call: call, Result: result, Trusted: out.Trusted()})
 	switch {
 	case v.Denied != "":
 		r.toolFailed(ctx, call, record.ToolWithheld)
@@ -795,10 +909,10 @@ func (r *run) needsApproval(call model.ToolCall) (hook.ApprovalReason, bool) {
 	return "", false
 }
 
-// approve asks the approval point about call and returns the decision:
-// Approve, Reject, or Abstain for an action cancelled because nothing decided
-// it in time (ADR 0001 §7, §12).
-func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.ApprovalReason) hook.Answer {
+// approve asks the approval point about call, the step's call at index, and
+// returns the decision: Approve, Reject, or Abstain for an action cancelled
+// because nothing decided it in time (ADR 0001 §7, §12).
+func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.ApprovalReason, index int) hook.Answer {
 	id := newID()
 	v := r.hooks.Approve(ctx, hook.Event{Call: call, Approval: hook.ApprovalRequest{ID: id, Reason: reason}})
 	if v.Answer != hook.Pending {
@@ -808,32 +922,61 @@ func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.Appr
 		r.hooks.RecordApproval(ctx, v.By, registry.DecisionCancelled)
 		return hook.Abstain
 	}
-	decided, err := r.a.Approvals.Hold(ctx, approval.Pending{ID: id, Tool: call.Name})
+	p := pending{Approval: id, Index: index, Call: savedCall(call), By: v.By}
+	if r.approvalTimeout > 0 {
+		p.Until = time.Now().Add(r.approvalTimeout)
+	}
+	return r.await(ctx, call, p, func() { r.save(ctx, p) })
+}
+
+// await waits on the pending action p, held under its approval ID, until it
+// is decided or its time passes. held runs once the action is held. A run
+// that was saved marks its action proceeding before going on with the
+// decision; when another process resumed the run first, it gives up instead,
+// so the action never runs twice.
+func (r *run) await(ctx context.Context, call model.ToolCall, p pending, held func()) hook.Answer {
+	decided, err := r.a.Approvals.Hold(ctx, approval.Pending{ID: p.Approval, Tool: call.Name})
 	if err != nil {
-		r.hooks.RecordApproval(ctx, v.By, registry.DecisionCancelled)
+		r.hooks.RecordApproval(ctx, p.By, registry.DecisionCancelled)
 		return hook.Abstain
 	}
+	held()
 	wait := ctx
-	if r.approvalTimeout > 0 {
+	if !p.Until.IsZero() {
 		var cancel context.CancelFunc
-		wait, cancel = context.WithTimeout(ctx, r.approvalTimeout)
+		wait, cancel = context.WithDeadline(ctx, p.Until)
 		defer cancel()
 	}
-	select {
-	case ok := <-decided:
-		if ok {
-			r.hooks.RecordApproval(ctx, v.By, registry.DecisionApproved)
-			return hook.Approve
+	// A time already past wins over a decision already made, which select
+	// alone would pick at random.
+	answer := hook.Abstain
+	if wait.Err() == nil {
+		select {
+		case ok := <-decided:
+			answer = hook.Reject
+			if ok {
+				answer = hook.Approve
+			}
+		case <-wait.Done():
 		}
-		r.hooks.RecordApproval(ctx, v.By, registry.DecisionDenied)
-		return hook.Reject
-	case <-wait.Done():
+	}
+	if answer == hook.Abstain {
 		// Dropped before anything else, so a decision arriving now is refused
 		// as unknown rather than applied to an action that will not run.
-		_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), id)
-		r.hooks.RecordApproval(ctx, v.By, registry.DecisionTimedOut)
+		_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), p.Approval)
+		r.hooks.RecordApproval(ctx, p.By, registry.DecisionTimedOut)
 		return hook.Abstain
 	}
+	if err := r.proceed(ctx); err != nil {
+		r.hooks.RecordApproval(ctx, p.By, registry.DecisionCancelled)
+		return hook.Abstain
+	}
+	if answer == hook.Approve {
+		r.hooks.RecordApproval(ctx, p.By, registry.DecisionApproved)
+	} else {
+		r.hooks.RecordApproval(ctx, p.By, registry.DecisionDenied)
+	}
+	return answer
 }
 
 // newID names a run, or an action awaiting approval.

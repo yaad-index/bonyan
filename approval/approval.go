@@ -29,10 +29,14 @@ type Pending struct {
 // must be safe for concurrent use.
 type Store interface {
 	// Hold keeps p and returns a channel that receives the decision: true to
-	// approve. The channel receives at most once.
+	// approve. The channel receives at most once. Holding an action the store
+	// holds already adds a waiter for the same decision, which is how a run
+	// resumed after a restart waits on its action again (ADR 0001 §7); a
+	// store that keeps a decision made while nothing waited delivers it to
+	// the next waiter.
 	Hold(ctx context.Context, p Pending) (<-chan bool, error)
-	// Decide decides the action id. It returns ErrUnknown when the store does
-	// not hold it.
+	// Decide decides the action id, for every waiter. It returns ErrUnknown
+	// when the store does not hold it.
 	Decide(ctx context.Context, id string, approve bool) error
 	// Drop stops holding id, decided or not.
 	Drop(ctx context.Context, id string) error
@@ -47,8 +51,8 @@ type Memory struct {
 }
 
 type held struct {
-	p  Pending
-	ch chan bool
+	p       Pending
+	waiters []chan bool
 }
 
 // NewMemory returns an empty store.
@@ -61,15 +65,18 @@ func (m *Memory) Hold(_ context.Context, p Pending) (<-chan bool, error) {
 	if p.ID == "" {
 		return nil, errors.New("approval: empty id")
 	}
-	if _, ok := m.held[p.ID]; ok {
-		return nil, fmt.Errorf("approval: %q is already held", p.ID)
+	h, ok := m.held[p.ID]
+	if ok && h.p.Tool != p.Tool {
+		return nil, fmt.Errorf("approval: %q is held for another tool", p.ID)
 	}
 	ch := make(chan bool, 1)
-	m.held[p.ID] = held{p: p, ch: ch}
+	h.p = p
+	h.waiters = append(h.waiters, ch)
+	m.held[p.ID] = h
 	return ch, nil
 }
 
-// Decide decides id and stops holding it.
+// Decide decides id for every waiter and stops holding it.
 func (m *Memory) Decide(_ context.Context, id string, approve bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -78,7 +85,9 @@ func (m *Memory) Decide(_ context.Context, id string, approve bool) error {
 		return fmt.Errorf("%w: %q", ErrUnknown, id)
 	}
 	delete(m.held, id)
-	h.ch <- approve
+	for _, ch := range h.waiters {
+		ch <- approve
+	}
 	return nil
 }
 
