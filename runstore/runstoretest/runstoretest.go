@@ -77,6 +77,8 @@ func onlyOneClaimHoldsARun(t *testing.T, s runstore.Store) {
 	require.ErrorIs(t, s.Proceed(ctx, "r1", ""), runstore.ErrClaimed, "the process that ran it lost it to the claim")
 	require.ErrorIs(t, s.Proceed(ctx, "r1", "t2"), runstore.ErrClaimed)
 	require.NoError(t, s.Proceed(ctx, "r1", "t1"))
+	require.ErrorIs(t, s.Proceed(ctx, "r1", ""), runstore.ErrClaimed, "once the holder went ahead, still claimed by it")
+	require.ErrorIs(t, s.Proceed(ctx, "r1", "t1"), runstore.ErrProceeding)
 }
 
 func aClaimPassesWithTheDeadline(t *testing.T, s runstore.Store) {

@@ -59,9 +59,10 @@ type Store interface {
 	// ErrProceeding once its action is proceeding.
 	Claim(ctx context.Context, run, token string, now time.Time) (State, error)
 	// Proceed marks the run's pending action decided and going ahead, once:
-	// it fails with ErrProceeding when it is already marked, ErrClaimed when
-	// token is not the run's claim (empty for an unclaimed run), and
-	// ErrUnknown for a run the store does not hold.
+	// it fails with ErrClaimed when token is not the run's claim (empty for an
+	// unclaimed run), whether or not the holder marked it, ErrProceeding when
+	// the caller holds the run and it is marked already, and ErrUnknown for a
+	// run the store does not hold.
 	Proceed(ctx context.Context, run, token string) error
 	// Delete removes the run when token is its claim; otherwise it fails
 	// with ErrClaimed. A run the store does not hold is not an error.
@@ -135,10 +136,10 @@ func (m *Memory) Proceed(_ context.Context, run, token string) error {
 	switch {
 	case !ok:
 		return ErrUnknown
-	case e.proceeding:
-		return ErrProceeding
 	case e.claim != token:
 		return ErrClaimed
+	case e.proceeding:
+		return ErrProceeding
 	}
 	e.proceeding = true
 	return nil
