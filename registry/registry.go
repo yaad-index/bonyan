@@ -398,7 +398,9 @@ type Components struct {
 	Approvals approval.Store
 	// RunStore is the run store, for agent.Agent.RunStore; nil when none is
 	// configured. With Memory configured too, deleting a subject from Memory
-	// deletes the subject's saved runs.
+	// deletes the subject's saved runs; without it, the program calls
+	// RunStore.DeleteSubject itself. Runs older than the retention period are
+	// removed only when the program calls RunStore.Purge.
 	RunStore *RunStore
 
 	// owned is a sink the registry opened, which Close closes.

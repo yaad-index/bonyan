@@ -38,7 +38,8 @@ type RunStore struct {
 	now       func() time.Time
 }
 
-// Purge removes every run saved longer ago than the retention period.
+// Purge removes every run saved longer ago than the retention period. bonyan
+// never calls it: the program does, as often as its retention needs.
 func (s *RunStore) Purge(ctx context.Context) error {
 	return s.DeleteBefore(ctx, s.now().Add(-s.retention))
 }
