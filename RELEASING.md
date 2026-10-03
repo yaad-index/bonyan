@@ -60,7 +60,7 @@ close/reopen.
 
 Some packages are modules of their own, nested in this repository
 ([ADR 0002](adr/0002-stack-and-dependencies.md), section 5). Today those are
-`memory/sqlite` and `tokenize/tiktoken`. Each is a separate package in `release-please-config.json`
+`memory/sqlite`, `memory/honcho` and `tokenize/tiktoken`. Each is a separate package in `release-please-config.json`
 and gets its own release PR, tagged `<path>/vX.Y.Z` (for example
 `tokenize/tiktoken/v0.1.0`), the form Go requires for a module in a
 subdirectory. The root keeps `vX.Y.Z`, and a change only inside a nested module

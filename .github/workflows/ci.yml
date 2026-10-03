@@ -32,6 +32,7 @@ jobs:
             tools/go.sum
             go.sum
             memory/sqlite/go.sum
+            memory/honcho/go.sum
             tokenize/tiktoken/go.sum
 
       - name: Check
