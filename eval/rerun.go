@@ -327,8 +327,11 @@ func (t *replayTools) Source(name string) content.Kind {
 // trust policy classifies a replayed result under the server it classified
 // the original under. A live tool's server is its tools' answer now.
 func (t *replayTools) Server(name string) string {
-	if live, ok := t.live.(agent.Servers); ok && t.liveSet[name] {
-		return live.Server(name)
+	if t.liveSet[name] {
+		if live, ok := t.live.(agent.Servers); ok {
+			return live.Server(name)
+		}
+		return ""
 	}
 	return t.servers[name]
 }

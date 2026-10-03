@@ -665,6 +665,7 @@ func TestAReplayedResultKeepsItsServer(t *testing.T) {
 		"replayed, tools naming none":           {&liveTools{out: "LIVE", kind: content.KindRemoteTool}, nil, true},
 		"live, from another server":             {servedTools{&liveTools{out: "LIVE", kind: content.KindRemoteTool}, "web"}, []string{"search"}, false},
 		"live, from the trusted server":         {servedTools{&liveTools{out: "LIVE", kind: content.KindRemoteTool}, "docs"}, []string{"search"}, true},
+		"live, from tools naming none":          {&liveTools{out: "LIVE", kind: content.KindRemoteTool}, []string{"search"}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := &searchThenAnswer{args: `{"q":"x"}`}
