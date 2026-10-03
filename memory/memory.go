@@ -9,7 +9,9 @@
 // policy when the record is written. On every read the policy is applied again
 // and the stricter of the two decisions wins, so nothing comes back more
 // trusted than the material it came from. Records older than the retention
-// period are never returned, and Purge deletes them.
+// period are never returned, and Purge deletes them. Every text written is
+// scrubbed of resolved secrets before it reaches the backend, whatever writes
+// it, so neither a backend nor a backend's own models ever see one.
 //
 // Long-term facts may be extracted asynchronously: a fact remembered during one
 // turn is not promised to be recallable on the next.
@@ -23,6 +25,7 @@ import (
 	"time"
 
 	"github.com/yaad-index/bonyan/content"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -99,6 +102,11 @@ type Options struct {
 	PolicyName string
 	// Retention is how long a record is kept. It must be positive.
 	Retention time.Duration
+	// Scrubber removes resolved secrets from every text before it is written.
+	// It should be the program's own (registry.Components.Secrets), the one
+	// the agent and its hooks scrub with; nil is a scrubber holding no
+	// values, which removes nothing.
+	Scrubber *secret.Scrubber
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -110,6 +118,7 @@ type Store struct {
 	name      string
 	retention time.Duration
 	now       func() time.Time
+	scrub     *secret.Scrubber
 
 	mu       sync.Mutex
 	deleters []deleter
@@ -137,7 +146,10 @@ func NewStore(b Backend, opts Options) (*Store, error) {
 	if opts.Retention <= 0 {
 		return nil, fmt.Errorf("%w: retention must be positive, got %s", ErrInvalid, opts.Retention)
 	}
-	s := &Store{backend: b, policy: opts.Policy, name: opts.PolicyName, retention: opts.Retention, now: opts.Now}
+	s := &Store{backend: b, policy: opts.Policy, name: opts.PolicyName, retention: opts.Retention, now: opts.Now, scrub: opts.Scrubber}
+	if s.scrub == nil {
+		s.scrub = secret.NewScrubber()
+	}
 	if s.policy == nil {
 		s.policy, s.name = trust.Default{}, trust.DefaultName
 	}
@@ -174,6 +186,7 @@ func (s *Store) write(ctx context.Context, r Record) error {
 	if r.Server != "" && r.Origin != content.KindRemoteTool {
 		return fmt.Errorf("%w: a server for %s, which no tool server returned", ErrInvalid, r.Origin)
 	}
+	r.Text = s.scrub.Scrub(r.Text)
 	r.At = s.now()
 	r.Decision = Decision{Verdict: s.classify(ctx, r.Origin, r.Server), Policy: s.name}
 	_, err := s.backend.Write(ctx, r)

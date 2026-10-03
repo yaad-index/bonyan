@@ -13,6 +13,7 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -341,4 +342,40 @@ func (k trustOrigin) Classify(_ context.Context, src content.Provenance) (trust.
 		return trust.Decision{Verdict: trust.Trusted}, nil
 	}
 	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// oneSecret is a secret source holding one value under one name.
+type oneSecret struct{ name, value string }
+
+func (o oneSecret) Lookup(_ context.Context, name string) (string, error) {
+	if name != o.name {
+		return "", secret.ErrNotFound
+	}
+	return o.value, nil
+}
+
+// Every text the Store writes reaches the backend with each resolved secret
+// scrubbed, an event or a fact alike, whatever wrote it.
+func TestEveryWriteIsScrubbed(t *testing.T) {
+	ctx := context.Background()
+	res := secret.NewResolver(oneSecret{"key", "SECRET-a71"})
+	_, err := res.Scope("key").Resolve(ctx, "key")
+	require.NoError(t, err)
+	b := inmem.New()
+	s, err := memory.NewStore(b, memory.Options{Retention: time.Hour, Scrubber: res.Scrubber()})
+	require.NoError(t, err)
+	user := content.Provenance{Kind: content.KindUser}
+	require.NoError(t, s.Append(ctx, "ana", "s1", user, "my key is SECRET-a71"))
+	require.NoError(t, s.Remember(ctx, "ana", user, "her key is SECRET-a71"))
+
+	events, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	facts, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Len(t, facts, 1)
+	for _, r := range append(events, facts...) {
+		assert.NotContains(t, r.Text, "SECRET-a71", "as the backend holds it")
+		assert.Contains(t, r.Text, "key is")
+	}
 }
