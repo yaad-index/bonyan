@@ -129,7 +129,9 @@ type Agent struct {
 	// Memory is the agent's memory (registry.Components.Memory); nil means
 	// none. At the start of a run the facts about Subject matching the user's
 	// message are recalled into the context, and the message is stored as an
-	// event of Session (ADR 0001 §4).
+	// event of Session (ADR 0001 §4); a run that answers stores its answer
+	// there too, as model output. memory.Messages reads a session back as
+	// History.
 	Memory *memory.Store
 	// Subject is who the run is about. It is required with Memory, and with
 	// a Recorder that hands runs to a queue for live evaluation, which queues
@@ -442,6 +444,7 @@ func (r *run) loop(ctx context.Context, maxSteps int, input content.Untrusted) (
 					return NotCleared(ReasonInvalidOutput), rep
 				}
 			}
+			r.storeEvent(ctx, content.Provenance{Kind: content.KindModel}, answer)
 			return Answered(answer), rep
 		}
 
@@ -617,7 +620,8 @@ func (r *run) classifyContext(ctx context.Context) {
 // into the run's context, then stores message as an event of the session,
 // each through its hook point. A denial or a failing hook at either leaves
 // nothing recalled or nothing stored, and the run goes on; so does a failure
-// of the memory itself, which is recorded.
+// of the memory itself, which is recorded. The run's answer is stored the same
+// way when the run clears.
 func (r *run) useMemory(ctx context.Context, from content.Provenance, message string) {
 	if r.a.Memory == nil {
 		return
@@ -639,17 +643,25 @@ func (r *run) useMemory(ctx context.Context, from content.Provenance, message st
 			r.memory = recalled
 		}
 	}
-	if r.a.Session == "" {
+	r.storeEvent(ctx, from, message)
+}
+
+// storeEvent stores text, which came from from, as an event of the run's
+// session through the memory write hook point; the user's message is stored
+// under its own source, and the run's answer as model output (ADR 0001 §3,
+// §4). It stores nothing for a run with no memory or no session.
+func (r *run) storeEvent(ctx context.Context, from content.Provenance, text string) {
+	if r.a.Memory == nil || r.a.Session == "" {
 		return
 	}
-	v := r.hooks.Run(ctx, hook.Event{Point: hook.MemoryWrite, Message: content.From(from, message)})
+	v := r.hooks.Run(ctx, hook.Event{Point: hook.MemoryWrite, Message: content.From(from, text)})
 	if v.Denied != "" {
 		return
 	}
 	if len(v.Changed) > 0 {
-		message = v.Event.Message.Raw()
+		text = v.Event.Message.Raw()
 	}
-	if err := r.a.Memory.Append(ctx, r.a.Subject, r.a.Session, from.Kind, message); err != nil {
+	if err := r.a.Memory.Append(ctx, r.a.Subject, r.a.Session, from.Kind, text); err != nil {
 		r.memoryFailed(ctx, "write")
 	}
 }

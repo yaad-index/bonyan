@@ -70,26 +70,69 @@ func TestRecalledFactsEnterTheContext(t *testing.T) {
 	assert.Equal(t, []string{"prefers mail over calls"}, recalledIn(m.reqs[0]))
 }
 
-// The user's message is stored as an event of the session.
+// The user's message is stored as an event of the session, and so is the
+// run's answer, as model output.
 func TestTheMessageIsStoredInTheSession(t *testing.T) {
 	a, _, store := withMemory(t)
 	_, _, err := agent.Run(context.Background(), a, input("remember the blue folder"))
 	require.NoError(t, err)
 	got, err := store.History(context.Background(), "ana", "s1")
 	require.NoError(t, err)
-	require.Len(t, got, 1)
+	require.Len(t, got, 2)
 	assert.Equal(t, "remember the blue folder", got[0].(content.Untrusted).Raw())
 	assert.Equal(t, content.KindUser, got[0].(content.Untrusted).Provenance().Origin)
+	assert.Equal(t, "done", got[1].(content.Untrusted).Raw())
+	assert.Equal(t, content.KindModel, got[1].(content.Untrusted).Provenance().Origin)
 }
 
+// The answer stored is the one the run gave, after the hooks at the reply
+// point; a run that gives none stores none.
+func TestTheAnswerStoredIsTheOneGiven(t *testing.T) {
+	for name, tc := range map[string]struct {
+		f    func(hook.Event) (hook.Action, error)
+		want []string
+	}{
+		"changed": {
+			f: func(hook.Event) (hook.Action, error) {
+				s := "done, [redacted]"
+				return hook.Action{Text: &s}, nil
+			},
+			want: []string{"go", "done, [redacted]"},
+		},
+		"denied": {f: func(hook.Event) (hook.Action, error) { return hook.Action{Deny: true}, nil }, want: []string{"go"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _, store := withMemory(t)
+			withHooks(t, &a, nil, map[hook.Point][]string{hook.Reply: {"h"}}, map[string]hook.Hook{"h": &interceptor{f: tc.f}})
+			_, _, err := agent.Run(context.Background(), a, input("go"))
+			require.NoError(t, err)
+			got, err := store.History(context.Background(), "ana", "s1")
+			require.NoError(t, err)
+			var texts []string
+			for _, g := range got {
+				texts = append(texts, g.(content.Untrusted).Raw())
+			}
+			assert.Equal(t, tc.want, texts)
+		})
+	}
+}
+
+// A run with no session stores neither its message nor its answer, and
+// never reaches the memory write hook point.
 func TestNoSessionStoresNothing(t *testing.T) {
 	a, _, store := withMemory(t)
 	a.Session = ""
+	writes := 0
+	withHooks(t, &a, nil, map[hook.Point][]string{hook.MemoryWrite: {"h"}}, map[string]hook.Hook{"h": &interceptor{f: func(hook.Event) (hook.Action, error) {
+		writes++
+		return hook.Action{}, nil
+	}}})
 	_, _, err := agent.Run(context.Background(), a, input("remember the blue folder"))
 	require.NoError(t, err)
 	got, err := store.History(context.Background(), "ana", "s1")
 	require.NoError(t, err)
 	assert.Empty(t, got)
+	assert.Zero(t, writes)
 }
 
 func TestMemoryNeedsASubject(t *testing.T) {
@@ -151,7 +194,8 @@ func TestTheRecallHook(t *testing.T) {
 	}
 }
 
-// A hook at memory write may change the text or deny it; a denial or a
+// A hook at memory write sees the user's message and the run's answer, each
+// under its own source, and may change either or deny it; a denial or a
 // failure leaves it unstored, and the run goes on.
 func TestTheWriteHook(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -159,15 +203,21 @@ func TestTheWriteHook(t *testing.T) {
 		want []string
 	}{
 		"changes it": {
-			f: func(hook.Event) (hook.Action, error) {
-				s := "remember the [redacted] folder"
+			f: func(ev hook.Event) (hook.Action, error) {
+				s := "[redacted] " + ev.Message.Raw()
 				return hook.Action{Text: &s}, nil
 			},
-			want: []string{"remember the [redacted] folder"},
+			want: []string{"[redacted] remember the blue folder", "[redacted] done"},
+		},
+		"denies the answer": {
+			f: func(ev hook.Event) (hook.Action, error) {
+				return hook.Action{Deny: ev.Message.Provenance().Kind == content.KindModel}, nil
+			},
+			want: []string{"remember the blue folder"},
 		},
 		"denies":     {f: func(hook.Event) (hook.Action, error) { return hook.Action{Deny: true}, nil }},
 		"fails":      {f: func(hook.Event) (hook.Action, error) { return hook.Action{}, errors.New("down") }},
-		"lets it be": {f: func(hook.Event) (hook.Action, error) { return hook.Action{}, nil }, want: []string{"remember the blue folder"}},
+		"lets it be": {f: func(hook.Event) (hook.Action, error) { return hook.Action{}, nil }, want: []string{"remember the blue folder", "done"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, _, store := withMemory(t)
