@@ -260,9 +260,10 @@ func TestAResumedActionIsDeniedOrTimesOut(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	second = newProcess(t, runs, store, answer("done"))
 	second.agent.Approvals = store
-	out, _, err = agent.Resume(context.Background(), second.agent, id)
+	out, rep, err := agent.Resume(context.Background(), second.agent, id)
 	require.NoError(t, err)
 	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
+	assert.Equal(t, 1, rep.Steps, "the step it was in")
 	assert.Empty(t, second.tools.calls)
 	assert.Equal(t, []string{"a:timed out"}, approvals(second.sink))
 }
@@ -662,4 +663,113 @@ func TestASavedMessageHoldsNoSecret(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.NotContains(t, string(list[0].Data), "SECRET-9c4")
+}
+
+// A call of the pending step still to run after the action runs from the
+// saved state too, so one whose arguments hold a secret keeps the run from
+// being saved, as the action's own would.
+func TestALaterCallWithASecretIsNotSaved(t *testing.T) {
+	res := secret.NewResolver(source{"key": "SECRET-9c4"})
+	_, err := res.Scope("key").Resolve(context.Background(), "key")
+	require.NoError(t, err)
+	runs, store := runstore.NewMemory(), approval.NewMemory()
+	threeCalls := func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{
+			ToolCalls: []model.ToolCall{
+				{ID: "c1", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+				{ID: "c2", Name: "search", Arguments: json.RawMessage(`{"q":"x"}`)},
+				{ID: "c3", Name: "lookup", Arguments: json.RawMessage(`{"k":"SECRET-9c4"}`)},
+			},
+			StopReason: model.StopToolCalls, Usage: usage,
+		}, nil
+	}
+	p := newProcess(t, runs, store, threeCalls, answer("done"))
+	p.agent.Scrubber = res.Scrubber()
+	go decideWhenHeld(t, store, true)
+	out, _, err := agent.Run(context.Background(), p.agent, input("find x"))
+	require.NoError(t, err)
+	assert.True(t, out.Cleared(), "the run goes on unsaved")
+	assert.Contains(t, failures(p.sink, "runstore"), "save")
+	list, err := runs.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, list)
+	require.Len(t, p.tools.calls, 3)
+	assert.JSONEq(t, `{"k":"SECRET-9c4"}`, string(p.tools.calls[2].Arguments), "run as asked")
+}
+
+// decideWhenHeld decides the one action store holds, once it holds one.
+func decideWhenHeld(t *testing.T, store approval.Store, approve bool) {
+	var held []approval.Pending
+	if !assert.Eventually(t, func() bool {
+		held, _ = store.List(context.Background())
+		return len(held) == 1
+	}, 2*time.Second, 2*time.Millisecond) {
+		return
+	}
+	assert.NoError(t, store.Decide(context.Background(), held[0].ID, approve))
+}
+
+// When a later action cannot be saved, the earlier action's state, marked
+// proceeding, is removed rather than left stale: the later action waits
+// unsaved and goes ahead when approved, and nothing claims it was resumed
+// elsewhere.
+func TestAFailedSecondSaveLeavesNoStaleState(t *testing.T) {
+	res := secret.NewResolver(source{"key": "SECRET-9c4"})
+	_, err := res.Scope("key").Resolve(context.Background(), "key")
+	require.NoError(t, err)
+	runs, store := runstore.NewMemory(), approval.NewMemory()
+	p := newProcess(t, runs, store,
+		toolCall("search", `{"q":"x"}`), toolCall("search", `{"q":"SECRET-9c4"}`), answer("done"))
+	p.agent.Scrubber = res.Scrubber()
+	go func() {
+		decideWhenHeld(t, store, true)
+		if assert.Eventually(t, func() bool {
+			p.tools.mu.Lock()
+			defer p.tools.mu.Unlock()
+			return len(p.tools.calls) == 1
+		}, 2*time.Second, 2*time.Millisecond) {
+			decideWhenHeld(t, store, true)
+		}
+	}()
+	out, rep, err := agent.Run(context.Background(), p.agent, input("find x"))
+	require.NoError(t, err)
+	require.True(t, out.Cleared(), "%s: %v", out, rep.Err)
+	assert.Equal(t, []string{"search", "search"}, names(p.tools.calls))
+	list, err := runs.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, list)
+}
+
+// proceeding is a run store whose Proceed finds the action marked already.
+type proceeding struct{ runstore.Store }
+
+func (proceeding) Proceed(context.Context, string, string) error { return runstore.ErrProceeding }
+
+// An action found marked already is reported as such, not as resumed
+// elsewhere.
+func TestAnActionMarkedAlreadyIsReportedAsStarted(t *testing.T) {
+	store := approval.NewMemory()
+	p := newProcess(t, proceeding{runstore.NewMemory()}, store, toolCall("search", `{"q":"x"}`), answer("done"))
+	go decideWhenHeld(t, store, true)
+	out, rep, err := agent.Run(context.Background(), p.agent, input("find x"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
+	require.ErrorIs(t, rep.Err, agent.ErrActionStarted)
+	assert.Empty(t, p.tools.calls)
+}
+
+// A resume refused for its budget leaves the run for an agent with room.
+func TestAResumeOverBudgetLeavesTheRun(t *testing.T) {
+	runs, store := runstore.NewMemory(), approval.NewMemory()
+	id, _, stop := suspended(t, runs, store, nil)
+	defer stop()
+	small := newProcess(t, runs, store, answer("done"))
+	small.agent.Limits = agent.DefaultLimits()
+	small.agent.Limits.Budget.MaxTokens = 10
+	_, _, err := agent.Resume(context.Background(), small.agent, id)
+	require.Error(t, err, "15 tokens spent before do not fit in 10")
+	second := newProcess(t, runs, store, answer("done"))
+	out, _, err := resume(t, second, id, store, true)
+	require.NoError(t, err)
+	assert.True(t, out.Cleared())
 }

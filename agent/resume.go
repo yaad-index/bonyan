@@ -121,9 +121,10 @@ type part struct {
 	Text   string       `json:"text"`
 }
 
-// errSecretInAction is why a run whose pending action holds a resolved
-// secret is not saved: the saved action would not be the one approved.
-var errSecretInAction = errors.New("agent: the pending action holds a secret")
+// errSecretInAction is why a run is not saved when its pending action, or a
+// call of its step after it, holds a resolved secret: those run from the
+// saved state, which holds no secret, so they would not run as asked.
+var errSecretInAction = errors.New("agent: an action still to run holds a secret")
 
 // save keeps the run's state in the run store while p waits. A run that
 // cannot be saved goes on waiting in this process; the failure is recorded.
@@ -139,6 +140,12 @@ func (r *run) save(ctx context.Context, p pending) {
 	}
 	if err != nil {
 		r.record(ctx, record.Event{Slot: "runstore", Name: "save", Failure: string(registry.FailError)})
+		// An earlier action's state is stale now: removed, so this action
+		// waits unsaved in this process and nothing resumes the old one.
+		if r.suspend.saved {
+			_ = r.a.RunStore.Delete(context.WithoutCancel(ctx), r.suspend.run, r.suspend.token)
+			r.suspend.saved = false
+		}
 		return
 	}
 	r.suspend.token, r.suspend.saved = "", true
@@ -151,12 +158,19 @@ func (r *run) proceed(ctx context.Context) error {
 	if !r.suspend.saved {
 		return nil
 	}
-	if err := r.a.RunStore.Proceed(context.WithoutCancel(ctx), r.suspend.run, r.suspend.token); err != nil {
+	err := r.a.RunStore.Proceed(context.WithoutCancel(ctx), r.suspend.run, r.suspend.token)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, runstore.ErrClaimed):
 		r.suspend.err = ErrRunClaimed
-		r.record(ctx, record.Event{Slot: "runstore", Name: "proceed", Failure: string(registry.FailError)})
-		return err
+	case errors.Is(err, runstore.ErrProceeding):
+		r.suspend.err = ErrActionStarted
+	default:
+		r.suspend.err = fmt.Errorf("agent: the run store: %w", err)
 	}
-	return nil
+	r.record(ctx, record.Event{Slot: "runstore", Name: "proceed", Failure: string(registry.FailError)})
+	return err
 }
 
 // finish removes the run's saved state when the run ends. A run another
@@ -169,8 +183,14 @@ func (r *run) finish(ctx context.Context) {
 
 // encode writes the run's state for p, scrubbed.
 func (r *run) encode(p pending) ([]byte, error) {
-	if args := r.scrub.Scrub(string(p.Call.Arguments)); args != string(p.Call.Arguments) {
-		return nil, errSecretInAction
+	toRun := []model.ToolCall{p.Call.toolCall()}
+	if calls := lastCalls(r.current); p.Index < len(calls) {
+		toRun = append(toRun, calls[p.Index+1:]...)
+	}
+	for _, c := range toRun {
+		if r.scrub.Scrub(string(c.Arguments)) != string(c.Arguments) {
+			return nil, errSecretInAction
+		}
 	}
 	tokens, cost := r.meter.Spent()
 	s := saved{
@@ -341,7 +361,8 @@ func Resume(ctx context.Context, a Agent, id string) (Outcome, Report, error) {
 		return Outcome{}, Report{}, errors.Join(ErrChanged, a.RunStore.Save(ctx, state, token))
 	}
 	if err := s.meter.Carry(sv.Tokens, sv.Cost); err != nil {
-		return Outcome{}, Report{}, err
+		// Saved again unclaimed, so an agent with room in its budget can.
+		return Outcome{}, Report{}, errors.Join(err, a.RunStore.Save(ctx, state, token))
 	}
 
 	ctx, cancel := context.WithDeadline(ctx, state.Deadline)
@@ -362,7 +383,7 @@ func Resume(ctx context.Context, a Agent, id string) (Outcome, Report, error) {
 
 // resume goes on with a restored run from its pending action.
 func (r *run) resume(ctx context.Context, maxSteps int, sv saved) (Outcome, Report) {
-	var rep Report
+	rep := Report{Steps: r.step}
 	r.classifyContext(ctx)
 	r.recall(ctx, r.message)
 	r.restore(ctx, sv.Current)
