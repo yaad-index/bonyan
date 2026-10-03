@@ -20,6 +20,14 @@
 // never loses a newer record. Only writes made through the same Backend wait
 // for a rewrite: a write from another process to a session being rewritten can
 // be lost.
+//
+// A record's fields, the trust decision it was stored under included, are data
+// the service holds: a message whose fields hold a value bonyan never writes
+// is not read as a record, and is dropped by a rewrite, but whoever can write
+// to the service can store a well-formed one. The Store still applies its
+// policy to every record it reads, so a stored decision never makes a record
+// more trusted than the policy allows; give the service no wider access than
+// the memory itself.
 package honcho
 
 import (
@@ -217,6 +225,37 @@ type fields struct {
 
 const metaKey = "bonyan"
 
+// valid reports whether f holds only values bonyan writes: a known layer,
+// source and verdict (none read as trusted by the Store), a session for an event and none for a fact, and a
+// server only for remote tool output.
+func (f fields) valid() bool {
+	switch f.Layer {
+	case memory.ShortTerm:
+		if f.Session == "" {
+			return false
+		}
+	case memory.LongTerm:
+		if f.Session != "" {
+			return false
+		}
+	default:
+		return false
+	}
+	switch f.Origin {
+	case content.KindFetched, content.KindUser, content.KindTool, content.KindRemoteTool, content.KindModel:
+	default:
+		return false
+	}
+	if f.Server != "" && f.Origin != content.KindRemoteTool {
+		return false
+	}
+	switch f.Verdict {
+	case trust.NoDecision, trust.Untrusted, trust.Trusted:
+		return true
+	}
+	return false
+}
+
 func (f fields) metadata() map[string]any {
 	b, _ := json.Marshal(f)
 	var m map[string]any
@@ -236,7 +275,7 @@ func recordOf(subject string, m message) (memory.Record, bool) {
 		return memory.Record{}, false
 	}
 	var f fields
-	if err := json.Unmarshal(b, &f); err != nil || f.Layer == "" {
+	if err := json.Unmarshal(b, &f); err != nil || !f.valid() {
 		return memory.Record{}, false
 	}
 	id := f.Record
@@ -303,7 +342,9 @@ func (b *Backend) generations(ctx context.Context, ws string) (map[string][]int,
 	return out, nil
 }
 
-// Write stores r as a message, in the newest generation of its session.
+// Write stores r as a message, in the newest generation of its session. When
+// the workspace is gone, as after another process deleted the subject, it is
+// made again and the write tried once more.
 func (b *Backend) Write(ctx context.Context, r memory.Record) (string, error) {
 	ws, err := b.workspace(r.Subject)
 	if err != nil {
@@ -312,6 +353,17 @@ func (b *Backend) Write(ctx context.Context, r memory.Record) (string, error) {
 	l := b.lock(ws)
 	l.RLock()
 	defer l.RUnlock()
+	id, err := b.write(ctx, ws, r)
+	if errors.Is(err, errNotFound) {
+		b.mu.Lock()
+		delete(b.ready, ws)
+		b.mu.Unlock()
+		id, err = b.write(ctx, ws, r)
+	}
+	return id, err
+}
+
+func (b *Backend) write(ctx context.Context, ws string, r memory.Record) (string, error) {
 	if err := b.ensure(ctx, ws); err != nil {
 		return "", err
 	}
@@ -394,10 +446,10 @@ func (b *Backend) History(ctx context.Context, subject, session string, since ti
 
 // Recall returns at most limit facts written at or after since: the facts a
 // program remembered and those the deriver formed about the user, matched by
-// the service's semantic search, and remembered facts sharing a word with the
-// query, which the search can miss until the service has embedded them; a
-// fact whose text is the query comes first, and an empty query returns the
-// newest.
+// the service's semantic search, taking from each in turn so neither crowds
+// the other out, and then remembered facts sharing a word with the query,
+// which the search can miss until the service has embedded them; a fact whose
+// text is the query comes first, and an empty query returns the newest.
 func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, since time.Time) ([]memory.Record, error) {
 	ws, err := b.workspace(subject)
 	if err != nil {
@@ -407,12 +459,13 @@ func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, 
 	if err != nil {
 		return nil, err
 	}
+	facts, err := b.read(ctx, ws, subject, factsKey, gens[factsKey])
+	if err != nil {
+		return nil, err
+	}
+	keep := func(r memory.Record) bool { return r.Layer == memory.LongTerm && !r.At.Before(since) }
 	var found []memory.Record
 	if query == "" {
-		facts, err := b.read(ctx, ws, subject, factsKey, gens[factsKey])
-		if err != nil {
-			return nil, err
-		}
 		found = append(found, facts...)
 		cs, err := b.c.listConclusions(ctx, ws)
 		if err != nil && !errors.Is(err, errNotFound) {
@@ -421,63 +474,66 @@ func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, 
 		for _, c := range cs {
 			found = append(found, derived(subject, c))
 		}
+		found = slices.DeleteFunc(found, func(r memory.Record) bool { return !keep(r) })
 		slices.SortStableFunc(found, func(a, b memory.Record) int { return b.At.Compare(a.At) })
-	} else {
-		seen := map[string]bool{}
-		// The service embeds a message after it is written, so its search
-		// can miss a fact for a while: a fact sharing a word with the query
-		// is found by it all the same.
-		facts, err := b.read(ctx, ws, subject, factsKey, gens[factsKey])
+		return found[:min(limit, len(found))], nil
+	}
+	var searched []memory.Record
+	for _, g := range gens[factsKey] {
+		msgs, err := b.c.searchMessages(ctx, ws, sessionID(factsKey, g), query)
+		if errors.Is(err, errNotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
-		var byWord []memory.Record
-		for _, r := range slices.Backward(facts) {
-			if sharesWord(query, r.Text) {
-				byWord = append(byWord, r)
+		for _, m := range msgs {
+			if r, ok := recordOf(subject, m); ok && keep(r) {
+				searched = append(searched, r)
 			}
 		}
-		for _, g := range gens[factsKey] {
-			msgs, err := b.c.searchMessages(ctx, ws, sessionID(factsKey, g), query, limit)
-			if errors.Is(err, errNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			for _, m := range msgs {
-				if r, ok := recordOf(subject, m); ok && !seen[r.ID] {
-					seen[r.ID] = true
-					found = append(found, r)
-				}
-			}
-		}
-		for _, r := range byWord {
-			if !seen[r.ID] {
-				seen[r.ID] = true
-				found = append(found, r)
-			}
-		}
-		if len(gens) > 0 {
-			cs, err := b.c.queryConclusions(ctx, ws, query, limit)
-			if err != nil && !errors.Is(err, errNotFound) {
-				return nil, err
-			}
-			for _, c := range cs {
-				found = append(found, derived(subject, c))
-			}
-		}
-		slices.SortStableFunc(found, func(a, b memory.Record) int {
-			switch {
-			case a.Text == query && b.Text != query:
-				return -1
-			case b.Text == query && a.Text != query:
-				return 1
-			}
-			return 0
-		})
 	}
-	found = slices.DeleteFunc(found, func(r memory.Record) bool { return r.Layer != memory.LongTerm || r.At.Before(since) })
+	cs, err := b.c.queryConclusions(ctx, ws, query)
+	if err != nil && !errors.Is(err, errNotFound) {
+		return nil, err
+	}
+	var concluded []memory.Record
+	for _, c := range cs {
+		if r := derived(subject, c); keep(r) {
+			concluded = append(concluded, r)
+		}
+	}
+	for i := 0; i < max(len(searched), len(concluded)); i++ {
+		if i < len(searched) {
+			found = append(found, searched[i])
+		}
+		if i < len(concluded) {
+			found = append(found, concluded[i])
+		}
+	}
+	// The service embeds a message after it is written, so its search can
+	// miss a fact for a while: a fact sharing a word with the query is found
+	// by it all the same.
+	for _, r := range slices.Backward(facts) {
+		if keep(r) && sharesWord(query, r.Text) {
+			found = append(found, r)
+		}
+	}
+	seen := map[string]bool{}
+	found = slices.DeleteFunc(found, func(r memory.Record) bool {
+		dup := seen[r.ID]
+		seen[r.ID] = true
+		return dup
+	})
+	slices.SortStableFunc(found, func(a, b memory.Record) int {
+		switch {
+		case a.Text == query && b.Text != query:
+			return -1
+		case b.Text == query && a.Text != query:
+			return 1
+		}
+		return 0
+	})
 	return found[:min(limit, len(found))], nil
 }
 
@@ -590,16 +646,20 @@ func (b *Backend) purge(ctx context.Context, ws string, t time.Time) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for k, g := range gens {
 		if err := b.rewrite(ctx, ws, k, g, t); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
+// maxBatch is the most messages the service takes in one call.
+const maxBatch = 100
+
 // rewrite leaves the sessions under k holding only the records written at or
-// after t. When every record is older, every generation is deleted. When some
+// after t. A message bonyan did not write is not a record, and is not kept. When every record is older, every generation is deleted. When some
 // are, or an earlier rewrite was left half done, the newer records go to a new
 // generation first, and the older generations are deleted only once it holds
 // them all, so a rewrite cut short loses nothing.
@@ -647,8 +707,14 @@ func (b *Backend) rewrite(ctx context.Context, ws, k string, gens []int, t time.
 				Configuration: &configuration{Reasoning: reasoning{Enabled: false}},
 			})
 		}
-		if _, err := b.c.addMessages(ctx, ws, next, copies); err != nil {
-			return err
+		for chunk := range slices.Chunk(copies, maxBatch) {
+			got, err := b.c.addMessages(ctx, ws, next, chunk)
+			if err != nil {
+				return err
+			}
+			if len(got) != len(chunk) {
+				return fmt.Errorf("honcho: add messages: %d of %d copied", len(got), len(chunk))
+			}
 		}
 	}
 	for _, g := range gens {

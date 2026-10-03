@@ -2,8 +2,10 @@ package honcho_test
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -351,4 +353,142 @@ func TestAFactNotYetEmbeddedIsFoundByItsWords(t *testing.T) {
 	got, err := b.Recall(ctx, "ana", "how should we contact her, by mail?", 10, time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"prefers mail over calls"}, texts(got))
+}
+
+// A session holding more newer records than the service takes in one call is
+// rewritten in batches, keeping every one.
+func TestARewriteOfManyRecordsGoesInBatches(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "old", start))
+	require.NoError(t, err)
+	for i := range 150 {
+		_, err := b.Write(ctx, event("s1", "new "+strconv.Itoa(i), start.Add(time.Hour+time.Duration(i)*time.Second)))
+		require.NoError(t, err)
+	}
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(30*time.Minute)))
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	require.Len(t, h, 150)
+	assert.Equal(t, "new 0", h[0].Text)
+	assert.Equal(t, "new 149", h[149].Text)
+	assert.Len(t, f.sessions(onlyWorkspace(t, f)), 1)
+}
+
+// When the service keeps fewer copies than it was sent, the old generation is
+// not deleted: nothing newer is lost.
+func TestARewriteKeepsTheOldGenerationUntilEveryCopyIsIn(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	for i, text := range []string{"old", "new 1", "new 2"} {
+		_, err := b.Write(ctx, event("s1", text, start.Add(time.Duration(i)*time.Hour)))
+		require.NoError(t, err)
+	}
+	f.short = true
+	require.ErrorContains(t, b.DeleteBefore(ctx, start.Add(30*time.Minute)), "copied")
+	f.short = false
+	assert.Len(t, f.sessions(onlyWorkspace(t, f)), 2, "the old generation kept")
+	h, err := b.History(ctx, "ana", "s1", start.Add(30*time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new 1", "new 2"}, texts(h))
+}
+
+// A session that cannot be rewritten does not stop the others' purge.
+func TestOneSessionFailingDoesNotStopTheOthers(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "old in s1", start))
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s1", "new in s1", start.Add(2*time.Hour)))
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s2", "old in s2", start))
+	require.NoError(t, err)
+	s1 := hex.EncodeToString([]byte("s1"))
+	f.fail = func(method, path string) bool {
+		return method == http.MethodPost && strings.Contains(path, "/sessions/"+s1+"-g2")
+	}
+	require.Error(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	f.fail = nil
+	h, err := b.History(ctx, "ana", "s2", time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, h, "s2 purged all the same")
+}
+
+// A query recalls the user's conclusions when no session is left.
+func TestAQueryRecallsConclusionsWithNoSessionLeft(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "old", start))
+	require.NoError(t, err)
+	ws := onlyWorkspace(t, f)
+	f.conclude(ws, "user", "user", "commutes by train", start.Add(2*time.Hour))
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	require.Empty(t, f.sessions(ws))
+	got, err := b.Recall(ctx, "ana", "train", 10, time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"commutes by train"}, texts(got))
+}
+
+// Remembered facts do not crowd the deriver's conclusions out of a recall.
+func TestConclusionsAreNotCrowdedOut(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	for _, text := range []string{"likes trains", "rides trains daily", "trains on weekends"} {
+		_, err := b.Write(ctx, memory.Record{Layer: memory.LongTerm, Subject: "ana", Origin: content.KindUser, Text: text, At: start})
+		require.NoError(t, err)
+	}
+	f.conclude(onlyWorkspace(t, f), "user", "user", "commutes by trains", start)
+	got, err := b.Recall(ctx, "ana", "trains", 2, time.Time{})
+	require.NoError(t, err)
+	assert.Contains(t, texts(got), "commutes by trains")
+}
+
+// After another process deleted the subject, a write here makes the workspace
+// again rather than failing.
+func TestAWriteAfterAnotherProcessDeletedTheSubject(t *testing.T) {
+	f, srv := newFake(t)
+	here, there := open(t, f, srv.URL), open(t, f, srv.URL)
+	_, err := here.Write(ctx, event("s1", "first", start))
+	require.NoError(t, err)
+	require.NoError(t, there.DeleteSubject(ctx, "ana"))
+	_, err = here.Write(ctx, event("s1", "second", start))
+	require.NoError(t, err)
+	h, err := here.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"second"}, texts(h))
+}
+
+// A message whose bonyan fields hold a value bonyan never writes is not read
+// as a record.
+func TestAMessageWithFieldsBonyanNeverWritesIsNotARecord(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "real", start))
+	require.NoError(t, err)
+	ws := onlyWorkspace(t, f)
+	s := f.sessions(ws)[0]
+	for _, meta := range []map[string]any{
+		{"layer": "short-term", "session": "s1", "origin": "user", "verdict": 99},
+		{"layer": "other", "session": "s1", "origin": "user", "verdict": 2},
+		{"layer": "short-term", "session": "s1", "origin": "memory", "verdict": 2},
+		{"layer": "short-term", "session": "s1", "origin": "user", "server": "docs", "verdict": 2},
+		{"layer": "short-term", "origin": "user", "verdict": 2},
+	} {
+		f.plant(ws, s, map[string]any{"content": "planted", "peer_id": "user", "metadata": map[string]any{"bonyan": meta}, "created_at": start.Format(time.RFC3339)})
+	}
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"real"}, texts(h))
+}
+
+// An error from the HTTP client does not carry the URL, which names the
+// workspace and so encodes the subject.
+func TestAnErrorDoesNotNameTheWorkspace(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	srv.Close()
+	_, err := b.Write(ctx, event("s1", "hello", start))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), hex.EncodeToString([]byte("ana")))
+	assert.NotContains(t, err.Error(), "/v3/workspaces/")
 }

@@ -30,6 +30,8 @@ type fake struct {
 	// unembedded hides every message from search, as the service does until
 	// it has embedded them.
 	unembedded bool
+	// short answers a batch of messages with one fewer than it took.
+	short bool
 }
 
 type fakeWorkspace struct {
@@ -181,8 +183,13 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch p[4] {
 		case "messages":
+			batch := body["messages"].([]any)
+			if len(batch) > 100 {
+				write(w, http.StatusUnprocessableEntity, map[string]string{"detail": "too many messages"})
+				return
+			}
 			var out []map[string]any
-			for _, m := range body["messages"].([]any) {
+			for _, m := range batch {
 				m := m.(map[string]any)
 				m["id"] = f.id()
 				if _, ok := m["metadata"]; !ok {
@@ -190,6 +197,9 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				s.messages = append(s.messages, m)
 				out = append(out, m)
+			}
+			if f.short && len(out) > 0 {
+				out = out[:len(out)-1]
 			}
 			write(w, http.StatusCreated, out)
 		case "search":
@@ -298,4 +308,13 @@ func (f *fake) conclude(ws, observer, observed, text string, at time.Time) {
 	defer f.mu.Unlock()
 	w := f.ws[ws]
 	w.conclusions = append(w.conclusions, fakeConclusion{ID: f.id(), Content: text, Observer: observer, Observed: observed, At: at})
+}
+
+// plant adds a message to a workspace's session directly, as anyone able to
+// write to the service could.
+func (f *fake) plant(ws, s string, m map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	m["id"] = f.id()
+	f.ws[ws].sessions[s].messages = append(f.ws[ws].sessions[s].messages, m)
 }

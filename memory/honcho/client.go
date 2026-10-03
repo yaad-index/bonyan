@@ -55,9 +55,19 @@ func (c *client) call(ctx context.Context, method, op, path string, query url.Va
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		// The URL names the workspace, which encodes the subject: it is left
+		// out.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return fmt.Errorf("honcho: %s: %w", op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// Read so the connection can be reused; never returned.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("%w: %s", errNotFound, op)
@@ -191,9 +201,11 @@ func (c *client) listMessages(ctx context.Context, ws, s string) ([]message, err
 	return list[message](ctx, c, "list messages", sessionPath(ws, s)+"/messages/list", map[string]any{})
 }
 
-func (c *client) searchMessages(ctx context.Context, ws, s, query string, limit int) ([]message, error) {
+// searchMessages returns the messages of session s best matching query, as
+// many as the service serves at once, for the caller to filter and cut.
+func (c *client) searchMessages(ctx context.Context, ws, s, query string) ([]message, error) {
 	var out []message
-	err := c.call(ctx, http.MethodPost, "search messages", sessionPath(ws, s)+"/search", nil, map[string]any{"query": query, "limit": min(limit, pageSize)}, &out)
+	err := c.call(ctx, http.MethodPost, "search messages", sessionPath(ws, s)+"/search", nil, map[string]any{"query": query, "limit": pageSize}, &out)
 	return out, err
 }
 
@@ -204,9 +216,11 @@ func (c *client) listConclusions(ctx context.Context, ws string) ([]conclusion, 
 	return list[conclusion](ctx, c, "list conclusions", wsPath(ws)+"/conclusions/list", map[string]any{"filters": selfFilter})
 }
 
-func (c *client) queryConclusions(ctx context.Context, ws, query string, limit int) ([]conclusion, error) {
+// queryConclusions returns the user's conclusions best matching query, as
+// many as the service serves at once, for the caller to filter and cut.
+func (c *client) queryConclusions(ctx context.Context, ws, query string) ([]conclusion, error) {
 	var out []conclusion
-	err := c.call(ctx, http.MethodPost, "query conclusions", wsPath(ws)+"/conclusions/query", nil, map[string]any{"query": query, "top_k": min(limit, pageSize), "filters": selfFilter}, &out)
+	err := c.call(ctx, http.MethodPost, "query conclusions", wsPath(ws)+"/conclusions/query", nil, map[string]any{"query": query, "top_k": pageSize, "filters": selfFilter}, &out)
 	return out, err
 }
 
