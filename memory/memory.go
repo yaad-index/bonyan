@@ -100,7 +100,8 @@ type Backend interface {
 	// weighs rare words above common ones; memory/inmem, counting matched
 	// words, a reference rather than a recommendation), while one that
 	// matches by meaning also returns near matches. Every backend ranks a fact
-	// whose text is the query's first, and an empty query matches every fact.
+	// whose text is the query's above one holding only some of its words, and
+	// an empty query matches every fact.
 	Recall(ctx context.Context, subject, query string, limit int, since time.Time) ([]Record, error)
 	// DeleteSubject deletes every record of subject, events and facts alike.
 	DeleteSubject(ctx context.Context, subject string) error
