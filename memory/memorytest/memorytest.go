@@ -84,7 +84,7 @@ func recordsComeBackAsWritten(t *testing.T, b memory.Backend) {
 	e := event("ana", "s1", "the order is late", start)
 	e.Decision = memory.Decision{Verdict: trust.Trusted, Policy: "program"}
 	f := fact("ana", "prefers mail", start.Add(time.Second))
-	f.Origin = content.KindFetched
+	f.Origin, f.Server = content.KindRemoteTool, "docs"
 	ids := write(t, b, e, f)
 	assert.NotEqual(t, ids[0], ids[1], "IDs are distinct")
 
@@ -96,6 +96,7 @@ func recordsComeBackAsWritten(t *testing.T, b memory.Backend) {
 	assert.Equal(t, e.Subject, got[0].Subject)
 	assert.Equal(t, e.Session, got[0].Session)
 	assert.Equal(t, e.Origin, got[0].Origin)
+	assert.Empty(t, got[0].Server)
 	assert.Equal(t, e.Text, got[0].Text)
 	assert.True(t, e.At.Equal(got[0].At), "time %s, got %s", e.At, got[0].At)
 	assert.Equal(t, e.Decision, got[0].Decision)
@@ -105,7 +106,8 @@ func recordsComeBackAsWritten(t *testing.T, b memory.Backend) {
 	require.NoError(t, err)
 	require.Len(t, facts, 1)
 	assert.Equal(t, ids[1], facts[0].ID)
-	assert.Equal(t, content.KindFetched, facts[0].Origin)
+	assert.Equal(t, content.KindRemoteTool, facts[0].Origin)
+	assert.Equal(t, "docs", facts[0].Server, "the tool server's name comes back")
 	assert.Equal(t, "prefers mail", facts[0].Text)
 	assert.Equal(t, f.Decision, facts[0].Decision)
 	assert.Empty(t, facts[0].Session)

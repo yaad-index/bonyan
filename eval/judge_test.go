@@ -120,7 +120,7 @@ func TestGroundednessJudgesTheAnswerAgainstTheContext(t *testing.T) {
 func TestAClaimMayRestOnContextTheRecordingLeftOut(t *testing.T) {
 	store, err := memory.NewStore(inmem.New(), memory.Options{Retention: time.Hour})
 	require.NoError(t, err)
-	require.NoError(t, store.Remember(context.Background(), "ana", content.KindUser, "MEMORY-3b9 find things"))
+	require.NoError(t, store.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "MEMORY-3b9 find things"))
 	a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: resultSeen})
 	a.Memory, a.Subject = store, "ana"
 	run := recorded(t, a, "find x")

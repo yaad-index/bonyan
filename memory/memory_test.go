@@ -69,8 +69,8 @@ func TestTheStricterDecisionWins(t *testing.T) {
 			p := &policy{}
 			s := newStore(t, inmem.New(), p, &clock{start})
 			p.set(tc.stored, nil)
-			require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "prefers mail"))
-			require.NoError(t, s.Append(ctx, "ana", "s1", content.KindUser, "hello"))
+			require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
+			require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "hello"))
 			p.set(tc.now, nil)
 
 			facts, err := s.Recall(ctx, "ana", "", 10)
@@ -104,7 +104,7 @@ func TestAFailingPolicyIsUntrusted(t *testing.T) {
 			p := &policy{}
 			s := newStore(t, inmem.New(), p, &clock{start})
 			p.set(tc.storeVerdict, tc.storeErr)
-			require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "prefers mail"))
+			require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 			p.set(tc.readOK, tc.readErr)
 			got, err := s.Recall(ctx, "ana", "", 10)
 			require.NoError(t, err)
@@ -120,7 +120,7 @@ func TestTheStoredDecisionIsTheStores(t *testing.T) {
 	b := inmem.New()
 	p := &policy{verdict: trust.Trusted}
 	s := newStore(t, b, p, &clock{start})
-	require.NoError(t, s.Remember(ctx, "ana", content.KindFetched, "lives in a small town"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindFetched}, "lives in a small town"))
 
 	recs, err := b.Recall(ctx, "ana", "", 10, time.Time{})
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestTheStoredDecisionIsTheStores(t *testing.T) {
 // Untrusted memory comes back as memory, with the kind it came from.
 func TestUntrustedMemoryKeepsItsOrigin(t *testing.T) {
 	s := newStore(t, inmem.New(), nil, &clock{start})
-	require.NoError(t, s.Remember(ctx, "ana", content.KindTool, "prefers mail"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindTool}, "prefers mail"))
 	got, err := s.Recall(ctx, "ana", "", 10)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -171,13 +171,13 @@ func TestTheStoreHonoursRetentionAndSubjectOnRead(t *testing.T) {
 	c := &clock{start}
 	b := &careless{}
 	s := newStore(t, b, nil, c)
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "old"))
-	require.NoError(t, s.Append(ctx, "ana", "s1", content.KindUser, "old"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "old"))
+	require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "old"))
 	c.t = start.Add(23 * time.Hour)
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "recent"))
-	require.NoError(t, s.Append(ctx, "ana", "s1", content.KindUser, "recent"))
-	require.NoError(t, s.Remember(ctx, "bo", content.KindUser, "another subject"))
-	require.NoError(t, s.Append(ctx, "ana", "s2", content.KindUser, "another session"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "recent"))
+	require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "recent"))
+	require.NoError(t, s.Remember(ctx, "bo", content.Provenance{Kind: content.KindUser}, "another subject"))
+	require.NoError(t, s.Append(ctx, "ana", "s2", content.Provenance{Kind: content.KindUser}, "another session"))
 	b.recs = append(b.recs, memory.Record{Layer: memory.LongTerm, Subject: "ana", Session: "s1", Origin: content.KindUser, Text: "a fact in a session", At: c.t})
 	c.t = start.Add(25 * time.Hour)
 
@@ -196,9 +196,9 @@ func TestPurgeDeletesWhatRetentionExpired(t *testing.T) {
 	c := &clock{start}
 	b := inmem.New()
 	s := newStore(t, b, nil, c)
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "old"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "old"))
 	c.t = start.Add(23 * time.Hour)
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "recent"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "recent"))
 	c.t = start.Add(25 * time.Hour)
 	require.NoError(t, s.Purge(ctx))
 
@@ -210,8 +210,8 @@ func TestPurgeDeletesWhatRetentionExpired(t *testing.T) {
 
 func TestDeleteSubject(t *testing.T) {
 	s := newStore(t, inmem.New(), nil, &clock{start})
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "a fact"))
-	require.NoError(t, s.Append(ctx, "ana", "s1", content.KindUser, "an event"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "a fact"))
+	require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "an event"))
 	require.NoError(t, s.DeleteSubject(ctx, "ana"))
 	facts, err := s.Recall(ctx, "ana", "", 10)
 	require.NoError(t, err)
@@ -229,9 +229,9 @@ func TestInvalidCalls(t *testing.T) {
 
 	s := newStore(t, inmem.New(), nil, &clock{start})
 	for name, err := range map[string]error{
-		"empty subject":  s.Remember(ctx, "", content.KindUser, "x"),
-		"empty origin":   s.Remember(ctx, "ana", "", "x"),
-		"empty session":  s.Append(ctx, "ana", "", content.KindUser, "x"),
+		"empty subject":  s.Remember(ctx, "", content.Provenance{Kind: content.KindUser}, "x"),
+		"empty origin":   s.Remember(ctx, "ana", content.Provenance{Kind: ""}, "x"),
+		"empty session":  s.Append(ctx, "ana", "", content.Provenance{Kind: content.KindUser}, "x"),
 		"zero limit":     func() error { _, err := s.Recall(ctx, "ana", "", 0); return err }(),
 		"history no sub": func() error { _, err := s.History(ctx, "", "s1"); return err }(),
 		"delete no sub":  s.DeleteSubject(ctx, ""),
@@ -245,8 +245,8 @@ func TestInvalidCalls(t *testing.T) {
 func TestThePolicyRunsOnEveryRead(t *testing.T) {
 	p := &policy{verdict: trust.Untrusted}
 	s := newStore(t, inmem.New(), p, &clock{start})
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "prefers mail"))
-	require.NoError(t, s.Append(ctx, "ana", "s1", content.KindUser, "hello"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
+	require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser}, "hello"))
 	_, err := s.Recall(ctx, "ana", "", 10)
 	require.NoError(t, err)
 	_, err = s.History(ctx, "ana", "s1")
@@ -259,7 +259,7 @@ func TestThePolicyRunsOnEveryRead(t *testing.T) {
 // that failed: it never reports a partial deletion as done.
 func TestDeleteSubjectReachesEveryDeleter(t *testing.T) {
 	s := newStore(t, inmem.New(), nil, &clock{start})
-	require.NoError(t, s.Remember(ctx, "ana", content.KindUser, "a fact"))
+	require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "a fact"))
 	var called []string
 	s.OnDeleteSubject("first", func(_ context.Context, subject string) error {
 		called = append(called, "first:"+subject)
@@ -283,4 +283,62 @@ func TestDeleteSubjectReachesEveryDeleter(t *testing.T) {
 	s2.OnDeleteSubject("only", func(context.Context, string) error { called = append(called, "only"); return nil })
 	require.NoError(t, s2.DeleteSubject(ctx, "ana"))
 	assert.Equal(t, []string{"only"}, called)
+}
+
+// trustServer trusts memory extracted from remote tool output of the one
+// server it names.
+type trustServer string
+
+func (p trustServer) Classify(_ context.Context, src content.Provenance) (trust.Decision, error) {
+	if src.Kind == content.KindMemory && src.Origin == content.KindRemoteTool && src.Server == string(p) {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// A fact extracted from a tool server's output keeps the server's name, so on
+// recall it is classified again under that server, never another or the
+// program's own tools.
+func TestARecalledFactKeepsItsServer(t *testing.T) {
+	for _, tc := range []struct {
+		policy  trust.Policy
+		trusted bool
+	}{
+		{trustServer("docs"), true},
+		{trustServer("web"), false},
+		{trustOrigin(content.KindTool), false},
+	} {
+		s := newStore(t, inmem.New(), tc.policy, &clock{t: start})
+		require.NoError(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindRemoteTool, Server: "docs", ID: "c1"}, "the docs say so"))
+		got, err := s.Recall(ctx, "ana", "", 10)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, tc.trusted, got[0].Trusted(), "%v", tc.policy)
+		var from content.Provenance
+		switch v := got[0].(type) {
+		case content.Trusted:
+			from = v.Provenance()
+		case content.Untrusted:
+			from = v.Provenance()
+		}
+		assert.Equal(t, content.KindRemoteTool, from.Origin)
+		assert.Equal(t, "docs", from.Server)
+	}
+}
+
+// Only remote tool output has a server.
+func TestAServerNeedsRemoteToolOutput(t *testing.T) {
+	s := newStore(t, inmem.New(), nil, &clock{t: start})
+	require.ErrorIs(t, s.Remember(ctx, "ana", content.Provenance{Kind: content.KindTool, Server: "docs"}, "x"), memory.ErrInvalid)
+	require.ErrorIs(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: content.KindUser, Server: "docs"}, "x"), memory.ErrInvalid)
+}
+
+// trustOrigin trusts memory extracted from material of one kind.
+type trustOrigin content.Kind
+
+func (k trustOrigin) Classify(_ context.Context, src content.Provenance) (trust.Decision, error) {
+	if src.Kind == content.KindMemory && src.Origin == content.Kind(k) {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
 }
