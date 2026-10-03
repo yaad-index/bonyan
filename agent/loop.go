@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/yaad-index/bonyan/approval"
@@ -136,8 +137,9 @@ type Agent struct {
 	// and metrics for the model calls (ADR 0001 §9); nil emits nothing.
 	Telemetry *telemetry.Telemetry
 	// Approvals holds actions whose approval an approver said is pending,
-	// until the program decides them through it; nil holds none, so a
-	// pending answer cancels the action at once.
+	// until the program decides them through it, under the name of each
+	// approver that said so; nil holds none, so a pending answer cancels the
+	// action at once.
 	Approvals approval.Store
 	// RunStore, when set, saves a run while an action waits on approval, so
 	// Resume can take it up after a restart (ADR 0001 §7); it needs Subject,
@@ -919,25 +921,26 @@ func (r *run) approve(ctx context.Context, call model.ToolCall, reason hook.Appr
 		return v.Answer
 	}
 	if r.a.Approvals == nil {
-		r.hooks.RecordApproval(ctx, v.By, registry.DecisionCancelled)
+		r.recordEach(ctx, v.Pending, registry.DecisionCancelled)
 		return hook.Abstain
 	}
-	p := pending{Approval: id, Index: index, Call: savedCall(call), By: v.By}
+	p := pending{Approval: id, Index: index, Call: savedCall(call), Approvers: v.Pending}
 	if r.approvalTimeout > 0 {
 		p.Until = time.Now().Add(r.approvalTimeout)
 	}
 	return r.await(ctx, call, p, func() { r.save(ctx, p) })
 }
 
-// await waits on the pending action p, held under its approval ID, until it
-// is decided or its time passes. held runs once the action is held. A run
-// that was saved marks its action proceeding before going on with the
-// decision; when another process resumed the run first, it gives up instead,
-// so the action never runs twice.
+// await waits on the pending action p, held under its approval ID, until
+// every approver that said pending decided, one of them denied it, or its
+// time passed. held runs once the action is held. A run that was saved marks
+// its action proceeding before going on with the decision; when another
+// process resumed the run first, it gives up instead, so the action never
+// runs twice.
 func (r *run) await(ctx context.Context, call model.ToolCall, p pending, held func()) hook.Answer {
-	decided, err := r.a.Approvals.Hold(ctx, approval.Pending{ID: p.Approval, Tool: call.Name})
+	decisions, err := r.a.Approvals.Hold(ctx, approval.Pending{ID: p.Approval, Tool: call.Name, Approvers: p.Approvers})
 	if err != nil {
-		r.hooks.RecordApproval(ctx, p.By, registry.DecisionCancelled)
+		r.recordEach(ctx, p.Approvers, registry.DecisionCancelled)
 		return hook.Abstain
 	}
 	held()
@@ -947,36 +950,67 @@ func (r *run) await(ctx context.Context, call model.ToolCall, p pending, held fu
 		wait, cancel = context.WithDeadline(ctx, p.Until)
 		defer cancel()
 	}
+	// Only a decision from an approver still to decide counts, so the wait
+	// never rests on the store delivering each decision once.
+	var made []approval.Decision
+	undecided := slices.Clone(p.Approvers)
+	answer := hook.Abstain
 	// A time already past wins over a decision already made, which select
 	// alone would pick at random.
-	answer := hook.Abstain
-	if wait.Err() == nil {
+	for answer == hook.Abstain && len(undecided) > 0 && wait.Err() == nil {
 		select {
-		case ok := <-decided:
-			answer = hook.Reject
-			if ok {
-				answer = hook.Approve
+		case d := <-decisions:
+			i := slices.Index(undecided, d.By)
+			if i < 0 {
+				continue
+			}
+			undecided = slices.Delete(undecided, i, i+1)
+			made = append(made, d)
+			if !d.Approve {
+				answer = hook.Reject
 			}
 		case <-wait.Done():
 		}
+	}
+	if answer == hook.Abstain && len(undecided) == 0 {
+		answer = hook.Approve
 	}
 	if answer == hook.Abstain {
 		// Dropped before anything else, so a decision arriving now is refused
 		// as unknown rather than applied to an action that will not run.
 		_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), p.Approval)
-		r.hooks.RecordApproval(ctx, p.By, registry.DecisionTimedOut)
+		r.recordMade(ctx, made)
+		r.recordEach(ctx, undecided, registry.DecisionTimedOut)
 		return hook.Abstain
 	}
 	if err := r.proceed(ctx); err != nil {
-		r.hooks.RecordApproval(ctx, p.By, registry.DecisionCancelled)
+		// Another process resumed the run and waits on the action itself.
+		r.recordEach(ctx, p.Approvers, registry.DecisionCancelled)
 		return hook.Abstain
 	}
-	if answer == hook.Approve {
-		r.hooks.RecordApproval(ctx, p.By, registry.DecisionApproved)
-	} else {
-		r.hooks.RecordApproval(ctx, p.By, registry.DecisionDenied)
-	}
+	// The run holds its action alone from here, so nothing else waits on it.
+	_ = r.a.Approvals.Drop(context.WithoutCancel(ctx), p.Approval)
+	r.recordMade(ctx, made)
 	return answer
+}
+
+// recordMade records each decision made on a pending action, under the
+// approver that made it.
+func (r *run) recordMade(ctx context.Context, made []approval.Decision) {
+	for _, d := range made {
+		decision := registry.DecisionDenied
+		if d.Approve {
+			decision = registry.DecisionApproved
+		}
+		r.hooks.RecordApproval(ctx, d.By, decision)
+	}
+}
+
+// recordEach records the same outcome for each of the approvers named.
+func (r *run) recordEach(ctx context.Context, approvers []string, decision string) {
+	for _, a := range approvers {
+		r.hooks.RecordApproval(ctx, a, decision)
+	}
 }
 
 // newID names a run, or an action awaiting approval.

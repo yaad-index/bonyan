@@ -480,23 +480,27 @@ func (h *Hooks) Run(ctx context.Context, ev hook.Event) hook.Verdict {
 type ApprovalVerdict struct {
 	Answer hook.Answer
 	// By names the hook behind the answer: the one that approved, rejected
-	// or said pending. It is empty when no hook decided.
+	// or, first, said pending. It is empty when no hook decided.
 	By string
+	// Pending names every hook that said pending, in order, each of which
+	// decides later on its own.
+	Pending []string
 }
 
 // Approve runs the hooks at the approval point (ADR 0001 §12). Each approver
 // answers in order, and the first rejection, or failure, ends the point. When
 // none rejected and one said pending, the action is pending, whatever the
 // others answered: a pending approver may still reject, so an approval alone
-// does not let the action through, and the decision made later through the
-// approval store answers for every approver that said pending. Otherwise the
+// does not let the action through, and each approver that said pending
+// decides later through the approval store, on its own. Otherwise the
 // action is approved when an approver approved it, and undecided, answered
 // Abstain, which cancels it. An observing hook only observes. Every outcome
 // but a pending one is recorded here; a pending action's outcome is recorded
-// with RecordApproval when it is decided.
+// with RecordApproval, for each approver, when it is decided.
 func (h *Hooks) Approve(ctx context.Context, ev hook.Event) ApprovalVerdict {
 	ev.Point = hook.Approval
-	var approved, pending string
+	var approved string
+	var pending []string
 	if h != nil {
 		ev = scrubEvent(ev, h.scrub)
 		for _, g := range h.byPoint[hook.Approval] {
@@ -508,15 +512,13 @@ func (h *Hooks) Approve(ctx context.Context, ev hook.Event) ApprovalVerdict {
 					approved = g.name
 				}
 			case hook.Pending:
-				if pending == "" {
-					pending = g.name
-				}
+				pending = append(pending, g.name)
 			}
 		}
 	}
 	switch {
-	case pending != "":
-		return ApprovalVerdict{Answer: hook.Pending, By: pending}
+	case len(pending) > 0:
+		return ApprovalVerdict{Answer: hook.Pending, By: pending[0], Pending: pending}
 	case approved != "":
 		h.RecordApproval(ctx, approved, DecisionApproved)
 		return ApprovalVerdict{Answer: hook.Approve, By: approved}

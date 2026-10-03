@@ -27,7 +27,7 @@ func TestTheDirectoryStoresSurviveReassembly(t *testing.T) {
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, c.RunStore.Save(ctx, saved("r1", "ana", time.Now()), ""))
-	_, err = c.Approvals.Hold(ctx, approval.Pending{ID: "a1", Tool: "search"})
+	_, err = c.Approvals.Hold(ctx, approval.Pending{ID: "a1", Tool: "search", Approvers: []string{"a"}})
 	require.NoError(t, err)
 
 	again, err := newRegistry(t).Assemble(cfg)
@@ -35,7 +35,7 @@ func TestTheDirectoryStoresSurviveReassembly(t *testing.T) {
 	assert.Equal(t, []string{"r1"}, runsHeld(t, again.RunStore))
 	held, err := again.Approvals.List(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, []approval.Pending{{ID: "a1", Tool: "search"}}, held)
+	assert.Equal(t, []approval.Pending{{ID: "a1", Tool: "search", Approvers: []string{"a"}}}, held)
 
 	for _, impl := range []string{registry.ApprovalsDir, registry.RunStoreDir} {
 		cfg := storesConfig(registry.SlotConfig{Impl: registry.ApprovalsInMem}, registry.SlotConfig{Impl: registry.RunStoreInMem}, "720h")

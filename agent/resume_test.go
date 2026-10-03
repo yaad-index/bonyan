@@ -26,11 +26,11 @@ import (
 // drops nothing, as a process that stopped while it waited.
 type deaf struct{ approval.Store }
 
-func (d deaf) Hold(ctx context.Context, p approval.Pending) (<-chan bool, error) {
+func (d deaf) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
 	if _, err := d.Store.Hold(ctx, p); err != nil {
 		return nil, err
 	}
-	return make(chan bool), nil
+	return make(chan approval.Decision), nil
 }
 
 func (deaf) Drop(context.Context, string) error { return nil }
@@ -63,7 +63,7 @@ type attached struct {
 	held chan string
 }
 
-func (a attached) Hold(ctx context.Context, p approval.Pending) (<-chan bool, error) {
+func (a attached) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
 	ch, err := a.Store.Hold(ctx, p)
 	a.held <- p.ID
 	return ch, err
@@ -92,8 +92,15 @@ type process struct {
 // the approver says is pending, and lookup runs at once.
 func newProcess(t *testing.T, runs runstore.Store, approvals approval.Store, steps ...func(model.ChatRequest) (model.ChatResponse, error)) process {
 	t.Helper()
+	return newProcessWith(t, runs, approvals, []hook.Hook{answers(hook.Pending)}, steps...)
+}
+
+// newProcessWith is newProcess with the given hooks at the approval point,
+// named a, b and on in order.
+func newProcessWith(t *testing.T, runs runstore.Store, approvals approval.Store, hooks []hook.Hook, steps ...func(model.ChatRequest) (model.ChatResponse, error)) process {
+	t.Helper()
 	sink := &eventSink{}
-	a, _, tl := gated(t, sink, answers(hook.Pending))
+	a, _, tl := gated(t, sink, hooks...)
 	m := &scripted{steps: stepsOf(steps...)}
 	a.Models = []agent.Model{{Name: "main", Chat: m}}
 	tl.out["lookup"] = "LOOKED-UP-9c4"
@@ -145,7 +152,7 @@ func resume(t *testing.T, p process, id string, store approval.Store, approve bo
 		select {
 		case aid := <-held:
 			// A run whose time is up has dropped its action already.
-			if err := store.Decide(context.Background(), aid, approve); !errors.Is(err, approval.ErrUnknown) {
+			if err := store.Decide(context.Background(), aid, "a", approve); !errors.Is(err, approval.ErrUnknown) {
 				assert.NoError(t, err)
 			}
 		case <-stop:
@@ -310,7 +317,7 @@ func TestOnlyOneProcessTakesARun(t *testing.T) {
 	_, _, err = agent.Resume(context.Background(), third.agent, id)
 	require.ErrorIs(t, err, agent.ErrRunClaimed)
 
-	require.NoError(t, store.Decide(context.Background(), aid, true))
+	require.NoError(t, store.Decide(context.Background(), aid, "a", true))
 	got := <-firstDone
 	close(release)
 	assert.Equal(t, agent.ReasonNotApproved, got.out.Reason())
@@ -343,7 +350,7 @@ func TestConcurrentResumesHaveOneWinner(t *testing.T) {
 	for range 7 {
 		require.ErrorIs(t, <-results, agent.ErrRunClaimed)
 	}
-	require.NoError(t, store.Decide(context.Background(), <-held, true))
+	require.NoError(t, store.Decide(context.Background(), <-held, "a", true))
 	require.NoError(t, <-results, "the winner")
 }
 
@@ -385,7 +392,7 @@ func TestADecidedActionIsNeverResumed(t *testing.T) {
 			held, err := store.List(context.Background())
 			require.NoError(t, err)
 			<-blocking.started // lookup
-			require.NoError(t, store.Decide(context.Background(), held[0].ID, approve))
+			require.NoError(t, store.Decide(context.Background(), held[0].ID, "a", approve))
 			<-blocking.started // the action, or the step after the denial
 
 			second := newProcess(t, runs, store, answer("done"))
@@ -498,7 +505,7 @@ func TestASavedRunHoldsNoSecret(t *testing.T) {
 			return len(held) == 1
 		}, 2*time.Second, 5*time.Millisecond)
 		held, _ := store.List(context.Background())
-		assert.NoError(t, store.Decide(context.Background(), held[0].ID, true))
+		assert.NoError(t, store.Decide(context.Background(), held[0].ID, "a", true))
 	}()
 	out, _, err := agent.Run(context.Background(), p.agent, input("find x"))
 	require.NoError(t, err)
@@ -596,12 +603,14 @@ func TestAResumedRunKeepsItsDeadline(t *testing.T) {
 // approved holds an action whose approval is in already.
 type approved struct{ approval.Store }
 
-func (a approved) Hold(ctx context.Context, p approval.Pending) (<-chan bool, error) {
+func (a approved) Hold(ctx context.Context, p approval.Pending) (<-chan approval.Decision, error) {
 	if _, err := a.Store.Hold(ctx, p); err != nil {
 		return nil, err
 	}
-	ch := make(chan bool, 1)
-	ch <- true
+	ch := make(chan approval.Decision, len(p.Approvers))
+	for _, by := range p.Approvers {
+		ch <- approval.Decision{By: by, Approve: true}
+	}
 	return ch, nil
 }
 
@@ -704,7 +713,7 @@ func decideWhenHeld(t *testing.T, store approval.Store, approve bool) {
 	}, 2*time.Second, 2*time.Millisecond) {
 		return
 	}
-	assert.NoError(t, store.Decide(context.Background(), held[0].ID, approve))
+	assert.NoError(t, store.Decide(context.Background(), held[0].ID, "a", approve))
 }
 
 // When a later action cannot be saved, the earlier action's state, marked
@@ -788,4 +797,69 @@ func TestARemovedRunGivesItsActionUp(t *testing.T) {
 	assert.Equal(t, agent.ReasonNotApproved, out.Reason())
 	require.ErrorIs(t, rep.Err, agent.ErrUnknownRun)
 	assert.Empty(t, p.tools.calls)
+}
+
+// A run resumed after a restart keeps the decisions made on its action
+// while it was down: it waits only for the approvers that had not decided,
+// and a denial made while it was down ends the wait at once (ADR 0001 §12).
+func TestAResumedRunKeepsTheDecisionsMade(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		down     approval.Decision
+		after    []approval.Decision
+		runs     bool
+		recorded []string
+	}{
+		{"approved while down", approval.Decision{By: "b", Approve: true}, []approval.Decision{{By: "a", Approve: true}}, true, []string{"b:approved", "a:approved"}},
+		{"denied while down", approval.Decision{By: "a"}, nil, false, []string{"a:denied"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			runs, store := runstore.NewMemory(), approval.NewMemory()
+			pendingTwice := []hook.Hook{answers(hook.Pending), answers(hook.Pending)}
+			first := newProcessWith(t, &stopping{Store: runs}, deaf{store}, pendingTwice, twoCalls, answer("never"))
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _, _ = agent.Run(ctx, first.agent, input("find x"))
+			}()
+			defer func() { cancel(); <-done }()
+			var held []approval.Pending
+			require.Eventually(t, func() bool {
+				list, _ := runs.List(context.Background())
+				held, _ = store.List(context.Background())
+				return len(list) == 1 && len(held) == 1
+			}, 2*time.Second, 5*time.Millisecond)
+			list, err := runs.List(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"a", "b"}, held[0].Approvers)
+			require.NoError(t, store.Decide(context.Background(), held[0].ID, c.down.By, c.down.Approve))
+
+			second := newProcessWith(t, runs, store, pendingTwice, answer("done"))
+			seen := make(chan string, 1)
+			second.agent.Approvals = attached{store, seen}
+			go func() {
+				aid := <-seen
+				for _, d := range c.after {
+					assert.NoError(t, store.Decide(context.Background(), aid, d.By, d.Approve))
+				}
+			}()
+			out, _, err := agent.Resume(context.Background(), second.agent, list[0].Run)
+			require.NoError(t, err)
+			assert.True(t, out.Cleared(), out.String())
+			if c.runs {
+				assert.Equal(t, []string{"search"}, names(second.tools.calls))
+			} else {
+				assert.Empty(t, second.tools.calls)
+			}
+			assert.Equal(t, c.recorded, approvals(second.sink))
+		})
+	}
+}
+
+// failingHold is an approval store that cannot hold an action.
+type failingHold struct{ approval.Store }
+
+func (failingHold) Hold(context.Context, approval.Pending) (<-chan approval.Decision, error) {
+	return nil, errors.New("disk full")
 }
