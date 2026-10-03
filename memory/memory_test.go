@@ -442,3 +442,78 @@ func raws(ts []content.Text) []string {
 	}
 	return out
 }
+
+// fixed returns the records it holds, as a backend that derived them would.
+type fixed struct{ recs []memory.Record }
+
+func (f fixed) Namespace() string { return "test" }
+func (f fixed) Write(context.Context, memory.Record) (string, error) {
+	return "", errors.New("read only")
+}
+
+func (f fixed) History(context.Context, string, string, time.Time) ([]memory.Record, error) {
+	return nil, nil
+}
+
+func (f fixed) Recall(context.Context, string, string, int, time.Time) ([]memory.Record, error) {
+	return f.recs, nil
+}
+func (fixed) DeleteSubject(context.Context, string) error   { return nil }
+func (fixed) DeleteBefore(context.Context, time.Time) error { return nil }
+
+// trustUsers trusts memory that came from a user's message, and nothing else.
+type trustUsers struct{}
+
+func (trustUsers) Classify(_ context.Context, p content.Provenance) (trust.Decision, error) {
+	if p.Kind == content.KindMemory && p.Origin == content.KindUser {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// A fact the backend derived is classified as model output too: a policy
+// trusting what users say does not trust a model's account of it, while the
+// same text stored as the user's own stays trusted.
+func TestADerivedFactIsClassifiedAsModelOutputToo(t *testing.T) {
+	rec := func(text string, derived bool) memory.Record {
+		return memory.Record{
+			Layer: memory.LongTerm, Subject: "test/ana", Origin: content.KindUser, Derived: derived, Text: text, At: start,
+			Decision: memory.Decision{Verdict: trust.Trusted, Policy: "users"},
+		}
+	}
+	s, err := memory.NewStore(fixed{[]memory.Record{rec("said it", false), rec("derived it", true)}}, memory.Options{
+		Namespace: "test", Policy: trustUsers{}, PolicyName: "users", Retention: 24 * time.Hour, Now: func() time.Time { return start },
+	})
+	require.NoError(t, err)
+	got, err := s.Recall(ctx, "ana", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.True(t, got[0].Trusted(), "the user's own, as the policy trusts it")
+	assert.False(t, got[1].Trusted(), "derived: also model output, which the policy does not trust")
+	assert.Equal(t, content.KindUser, got[1].(content.Untrusted).Provenance().Origin, "its source kept")
+}
+
+// trustModel trusts memory from model output, and nothing else.
+type trustModel struct{}
+
+func (trustModel) Classify(_ context.Context, p content.Provenance) (trust.Decision, error) {
+	if p.Kind == content.KindMemory && p.Origin == content.KindModel {
+		return trust.Decision{Verdict: trust.Trusted}, nil
+	}
+	return trust.Decision{Verdict: trust.Untrusted}, nil
+}
+
+// Classifying a derived fact as model output never raises it: under a policy
+// trusting model output but not users, a fact derived from a user's message
+// stays untrusted.
+func TestModelOutputNeverRaisesADerivedFact(t *testing.T) {
+	s, err := memory.NewStore(fixed{[]memory.Record{{
+		Layer: memory.LongTerm, Subject: "test/ana", Origin: content.KindUser, Derived: true, Text: "derived it", At: start,
+		Decision: memory.Decision{Verdict: trust.Trusted, Policy: "model"},
+	}}}, memory.Options{Namespace: "test", Policy: trustModel{}, Retention: 24 * time.Hour, Now: func() time.Time { return start }})
+	require.NoError(t, err)
+	got, err := s.Recall(ctx, "ana", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.False(t, got[0].Trusted())
+}

@@ -72,7 +72,12 @@ type Record struct {
 	// Server names the tool server remote tool output came from, as the
 	// program registered it, when Origin is content.KindRemoteTool; it is
 	// empty otherwise (ADR 0001 §3, §4).
-	Server   string
+	Server string
+	// Derived marks a fact the backend derived itself, its text written by
+	// the backend's own model: the Store classifies it under Origin and as
+	// model output too, the stricter decision winning (ADR 0001 §4). The
+	// Store never writes a derived record.
+	Derived  bool
 	Text     string
 	At       time.Time
 	Decision Decision
@@ -306,6 +311,9 @@ func (s *Store) read(ctx context.Context, recs []Record, layer Layer, subject, s
 		// The policy runs on every read, whatever the stored decision, so each
 		// recall's decision is made and recorded.
 		now := s.classify(ctx, r.Origin, r.Server)
+		if r.Derived && now == trust.Trusted {
+			now = s.classify(ctx, content.KindModel, "")
+		}
 		from := content.Provenance{Kind: content.KindMemory, Origin: r.Origin, Server: r.Server, ID: r.ID}
 		if r.Decision.Verdict == trust.Trusted && now == trust.Trusted {
 			out = append(out, content.TrustedFrom(from, r.Text))
