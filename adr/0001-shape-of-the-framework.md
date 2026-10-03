@@ -178,11 +178,39 @@ Two other positions were considered and rejected:
 - Two layers behind one interface:
   - **Short-term:** per-session history, stored as events.
   - **Long-term:** facts about a user or subject, extracted from sessions and recalled into context.
-- **A basic implementation ships in bonyan** (a local store with simple extraction and recall), so
-  memory works with no external service.
+- **A basic implementation ships in bonyan** (a local store with recall), so memory works with no
+  external service.
 - **External backends plug into the same interface** (for example a dedicated user-memory service
   run as a separate process). bonyan calls such a service over its API and does not vendor it, which
   also keeps bonyan's licence independent of the backend's.
+- **Memory has a namespace**, required in the memory configuration and applied by bonyan when it
+  builds the store, not left to the program or the backend. Every subject bonyan passes to a backend
+  is qualified by the namespace, escaped so that no subject can name another namespace; a record
+  outside the namespace is dropped on read; and a backend is opened with the namespace, so that what
+  it does across subjects, such as deleting what retention expired, stays inside it. A backend
+  refuses to read or delete outside its namespace. Programs sharing one backend, such as two
+  instances of one application, each have their own namespace and never see each other's records;
+  the conformance suite checks that two namespaces on one backend never do.
+- **A backend for an external service is a module of its own**, under `memory/` in bonyan's
+  repository with its own `go.mod`, as the basic sqlite backend is. A program registers it under a
+  name and it plugs in like any backend; it must pass the conformance suite. The core module carries
+  no code of it and no dependency of it.
+- **Extraction is the backend's job, not bonyan's.** Turning a session's events into long-term
+  facts belongs to the memory backend: a backend may derive facts with model calls of its own, or
+  extract nothing and hold only what a program remembers explicitly. bonyan's part is what reaches a
+  backend and what comes back from it:
+  - every event bonyan writes to a backend is scrubbed of resolved secrets first, so nothing reaches
+    a backend, or a backend's own models, that bonyan would not store;
+  - a fact a backend derives keeps as its source the kind of the events it was derived from, a
+    user's message or a model's reply, and is recalled under the rule below like any other fact; a
+    fact derived from events of more than one kind is classified under each, the stricter decision
+    winning;
+  - a backend's own model calls are outside bonyan: bonyan neither meters nor records them, so their
+    spend is outside a run's budget and what they derive is outside bonyan's recordings and
+    evaluation;
+  - deletion by subject covers every fact a backend derived. The conformance suite cannot wait for
+    a backend's own derivation, so a deriving backend shows it in its own tests, against a running
+    service: after deleting a subject, no fact derived about it remains.
 - Long-term extraction may run asynchronously, and the interface says so: a fact from this turn is
   not promised to be recallable on the next one.
 - **Recall re-applies trust by source.** Every record carries its source and the trust decision it
@@ -546,3 +574,12 @@ attached in code.
   timeout, the first later denial ends the wait, it runs only when none denied and one approved, a
   decision under a name that did not answer pending is unknown, a resumed run keeps the decisions
   made, and authenticating who decides under a name is the program's.
+- §4: extracting long-term facts from a session is the memory backend's job, not bonyan's, and the
+  basic implementation extracts nothing; bonyan scrubs every event before it reaches a backend; a
+  derived fact keeps the kind of its source events and is classified again on recall, under each
+  kind when there are several, the stricter decision winning; a backend's own model calls are
+  outside bonyan's budget and recordings; deletion by subject covers derived facts; a backend for
+  an external service is its own module under `memory/`, as the sqlite backend is, registered under
+  a name and passing the conformance suite, with no code or dependency of it in the core module;
+  memory has a required namespace, applied by bonyan, which qualifies every subject passed to a
+  backend, confines a backend's reads and deletions, and keeps programs sharing a backend apart.
