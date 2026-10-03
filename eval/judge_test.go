@@ -1,7 +1,11 @@
 package eval_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,11 +19,13 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/eval"
 	"github.com/yaad-index/bonyan/eval/score"
+	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
 	"github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/registry"
 )
 
 const (
@@ -269,4 +275,85 @@ func TestAgreementWithHandLabels(t *testing.T) {
 		_, err := r.Run(context.Background(), []score.Case{{Name: "a", Input: input("a"), Labels: labels}}, nil)
 		assert.Error(t, err, name)
 	}
+}
+
+// rewriting changes every reply to its text.
+type rewriting string
+
+func (rewriting) Observe(context.Context, hook.Event) error { return nil }
+func (r rewriting) Intercept(context.Context, hook.Event) (hook.Action, error) {
+	s := string(r)
+	return hook.Action{Text: &s}, nil
+}
+
+// failingObserver fails whenever it observes.
+type failingObserver struct{}
+
+func (failingObserver) Observe(context.Context, hook.Event) error { return errors.New("down") }
+
+// hookedRun records a run with the hooks given at each point, and returns its
+// answer and the run as read back.
+func hookedRun(t *testing.T, hooks map[hook.Point]hook.Hook) (string, record.Run) {
+	t.Helper()
+	a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: resultSeen})
+	f, err := record.OpenFile(record.FileOptions{Dir: t.TempDir()})
+	require.NoError(t, err)
+	r := registry.New()
+	require.NoError(t, r.RegisterChat("basic", func(json.RawMessage) (model.Chat, error) { return &counted{}, nil }))
+	cfg := registry.Config{Chat: registry.SlotConfig{Impl: "basic"}, Hooks: map[hook.Point][]registry.SlotConfig{}}
+	for p, h := range hooks {
+		require.NoError(t, r.RegisterHook(string(p), func(json.RawMessage) (hook.Hook, error) { return h, nil }))
+		cfg.Hooks[p] = []registry.SlotConfig{{Impl: string(p)}}
+	}
+	c, err := r.Assemble(cfg, registry.WithSink(f))
+	require.NoError(t, err)
+	a.Hooks, a.Scrubber, a.Recorder = c.Hooks, c.Secrets.Scrubber(), c.Recorder
+	out, _, err := agent.Run(context.Background(), a, input("find x"))
+	require.NoError(t, err)
+	given, ok := out.Answer()
+	require.True(t, ok)
+	require.NoError(t, f.Close())
+	raw, err := os.ReadFile(f.Path())
+	require.NoError(t, err)
+	_, runs, err := record.ReadRuns(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	return given, runs[0]
+}
+
+// When a hook changed the reply, the recording holds the model's text and not
+// the answer the run gave, so a run read from it is not judged; a runner,
+// which holds the answer given, still judges that. Any other hook event
+// leaves the recorded answer the one given.
+func TestAReplyAHookChangedIsJudgedOnlyFromTheAnswerGiven(t *testing.T) {
+	ok := `{"claims":[],"invented_citations":0}`
+	given, run := hookedRun(t, map[hook.Point]hook.Hook{hook.Reply: rewriting("REWRITTEN-3b9")})
+	require.Equal(t, "REWRITTEN-3b9", given)
+	m := &judgeModel{verdict: ok}
+	scores, failed := evaluate(t, run, eval.Groundedness{Judge: judgeAgent(m)})
+	assert.Empty(t, scores)
+	assert.Empty(t, failed)
+	assert.Empty(t, m.reqs, "the judge was not asked")
+
+	m = &judgeModel{verdict: ok}
+	scores, failed = score.Evaluate(context.Background(), score.Subject{Run: run, Answer: given, Answered: true}, eval.Groundedness{Judge: judgeAgent(m)})
+	require.Empty(t, failed)
+	assert.NotEmpty(t, scores)
+	require.Len(t, m.reqs, 1)
+	assert.Equal(t, "REWRITTEN-3b9", itemsOf(m.reqs[0])[0].text, "the answer the run gave")
+
+	given, run = hookedRun(t, map[hook.Point]hook.Hook{hook.Reply: failingObserver{}, hook.UserMessage: rewriting("find y")})
+	require.Equal(t, "saw: "+resultSeen, given)
+	var points []string
+	for _, e := range run.Events {
+		if e.Slot == registry.SlotHook {
+			points = append(points, e.Point+" "+e.Decision+" "+e.Failure)
+		}
+	}
+	assert.ElementsMatch(t, []string{"user_message changed ", "reply  error"}, points, "the recording holds the events under test")
+	m = &judgeModel{verdict: ok}
+	_, failed = evaluate(t, run, eval.Groundedness{Judge: judgeAgent(m)})
+	require.Empty(t, failed)
+	require.Len(t, m.reqs, 1, "judged from the recording")
+	assert.Equal(t, given, itemsOf(m.reqs[0])[0].text)
 }

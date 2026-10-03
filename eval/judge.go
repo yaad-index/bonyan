@@ -9,8 +9,10 @@ import (
 	"github.com/yaad-index/bonyan/agent"
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/eval/score"
+	"github.com/yaad-index/bonyan/hook"
 	"github.com/yaad-index/bonyan/prompt"
 	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/registry"
 )
 
 // The IDs the judge knows the run's message and its answer by. Each item of
@@ -271,10 +273,17 @@ func judgeInput(s score.Subject) (judged, bool, error) {
 }
 
 // recordedAnswer is the answer a recorded run ended with: the content of its
-// last chat call, when the run cleared.
+// last chat call, when the run cleared. A hook at the reply point that changed
+// the answer leaves only the model's text in the recording, not the answer
+// the run gave, so such a run has none to judge.
 func recordedAnswer(run record.Run) (string, bool) {
 	if run.End == nil || run.End.Outcome != record.OutcomeCleared {
 		return "", false
+	}
+	for _, e := range run.Events {
+		if e.Point == string(hook.Reply) && e.Decision == registry.DecisionChanged {
+			return "", false
+		}
 	}
 	for _, c := range slices.Backward(run.Calls) {
 		if c.Kind == record.KindChat {
