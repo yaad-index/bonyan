@@ -1,6 +1,6 @@
 {
   ".": "0.0.0",
   "memory/sqlite": "0.0.0",
-  "memory/honcho": "0.0.0",
+  "memory/honcho": "0.1.0",
   "tokenize/tiktoken": "0.0.0"
 }
