@@ -210,11 +210,14 @@ func recallHonoursTheLimit(t *testing.T, b memory.Backend) {
 	assert.Len(t, got, 2)
 }
 
+// The fact holding the query's own text ranks above a newer one holding only
+// some of its words, so a backend ranking by recency alone does not pass.
 func recallFindsAFactByItsText(t *testing.T, b memory.Backend) {
 	write(t, b,
-		fact("ana", "lives in a small town", start),
-		fact("ana", "prefers mail over calls", start.Add(time.Second)),
-		fact("bo", "prefers mail over calls", start.Add(2*time.Second)),
+		fact("ana", "prefers mail over calls", start),
+		fact("ana", "prefers phone calls", start.Add(time.Second)),
+		fact("ana", "lives in a small town", start.Add(2*time.Second)),
+		fact("bo", "prefers mail over calls", start.Add(3*time.Second)),
 	)
 	got, err := b.Recall(ctx, "ana", "prefers mail over calls", 2, never)
 	require.NoError(t, err)
