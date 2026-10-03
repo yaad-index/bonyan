@@ -20,5 +20,5 @@ func TestConformance(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, b.Close()) })
 			return b
 		}
-	})
+	}, memorytest.Lexical)
 }
