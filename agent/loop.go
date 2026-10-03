@@ -673,7 +673,7 @@ func (r *run) storeEvent(ctx context.Context, from content.Provenance, text stri
 	if len(v.Changed) > 0 {
 		text = v.Event.Message.Raw()
 	}
-	if err := r.a.Memory.Append(ctx, r.a.Subject, r.a.Session, from.Kind, text); err != nil {
+	if err := r.a.Memory.Append(ctx, r.a.Subject, r.a.Session, from, text); err != nil {
 		r.memoryFailed(ctx, "write")
 	}
 }

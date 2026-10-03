@@ -27,7 +27,7 @@ func TestMessagesAreTheSessionAsConversation(t *testing.T) {
 				origin content.Kind
 				text   string
 			}{{content.KindUser, "hi"}, {content.KindModel, "hello"}, {content.KindFetched, "a mail"}} {
-				require.NoError(t, s.Append(ctx, "ana", "s1", e.origin, e.text))
+				require.NoError(t, s.Append(ctx, "ana", "s1", content.Provenance{Kind: e.origin}, e.text))
 				c.t = c.t.Add(time.Second)
 			}
 			history, err := s.History(ctx, "ana", "s1")

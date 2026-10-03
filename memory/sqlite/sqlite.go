@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS records (
 	subject TEXT    NOT NULL,
 	session TEXT    NOT NULL,
 	origin  TEXT    NOT NULL,
+	server  TEXT    NOT NULL DEFAULT '',
 	text    TEXT    NOT NULL,
 	at      INTEGER NOT NULL,
 	verdict INTEGER NOT NULL,
@@ -79,7 +80,36 @@ func Open(path string) (*Backend, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: schema: %w", err)
 	}
+	if err := addServer(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite: schema: %w", err)
+	}
 	return &Backend{db: db}, nil
+}
+
+// addServer adds the server column to a database made before records had one.
+// Its records get no server, so a policy trusting a named server does not
+// trust them.
+func addServer(db *sql.DB) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info('records')`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == "server" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE records ADD COLUMN server TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // Close closes the database.
@@ -93,8 +123,8 @@ func (b *Backend) Write(ctx context.Context, r memory.Record) (string, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO records (layer, subject, session, origin, text, at, verdict, policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		string(r.Layer), r.Subject, r.Session, string(r.Origin), r.Text, r.At.UnixNano(), int(r.Decision.Verdict), r.Decision.Policy)
+		`INSERT INTO records (layer, subject, session, origin, server, text, at, verdict, policy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		string(r.Layer), r.Subject, r.Session, string(r.Origin), r.Server, r.Text, r.At.UnixNano(), int(r.Decision.Verdict), r.Decision.Policy)
 	if err != nil {
 		return "", err
 	}
@@ -113,7 +143,7 @@ func (b *Backend) Write(ctx context.Context, r memory.Record) (string, error) {
 	return strconv.FormatInt(id, 10), nil
 }
 
-const columns = `r.id, r.layer, r.subject, r.session, r.origin, r.text, r.at, r.verdict, r.policy`
+const columns = `r.id, r.layer, r.subject, r.session, r.origin, r.server, r.text, r.at, r.verdict, r.policy`
 
 // History returns a session's events in the order they were written.
 func (b *Backend) History(ctx context.Context, subject, session string, since time.Time) ([]memory.Record, error) {
@@ -165,7 +195,7 @@ func (b *Backend) query(ctx context.Context, q string, args ...any) ([]memory.Re
 			verdict               int
 			layer, origin, policy string
 		)
-		if err := rows.Scan(&id, &layer, &r.Subject, &r.Session, &origin, &r.Text, &at, &verdict, &policy); err != nil {
+		if err := rows.Scan(&id, &layer, &r.Subject, &r.Session, &origin, &r.Server, &r.Text, &at, &verdict, &policy); err != nil {
 			return nil, err
 		}
 		r.ID = strconv.FormatInt(id, 10)

@@ -23,7 +23,7 @@ func memoryStore(t *testing.T, facts ...string) *memory.Store {
 	s, err := memory.NewStore(inmem.New(), memory.Options{Retention: 24 * time.Hour})
 	require.NoError(t, err)
 	for _, f := range facts {
-		require.NoError(t, s.Remember(context.Background(), "ana", content.KindUser, f))
+		require.NoError(t, s.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, f))
 	}
 	return s
 }
@@ -261,7 +261,7 @@ func (trustMemory) Classify(context.Context, content.Provenance) (trust.Decision
 func TestAChangedTrustedRecallIsUntrusted(t *testing.T) {
 	store, err := memory.NewStore(inmem.New(), memory.Options{Policy: trustMemory{}, PolicyName: "all", Retention: time.Hour})
 	require.NoError(t, err)
-	require.NoError(t, store.Remember(context.Background(), "ana", content.KindUser, "prefers mail"))
+	require.NoError(t, store.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 	m := &scripted{steps: stepsOf(answer("done"))}
 	a := newAgent(agent.Model{Name: "main", Chat: m})
 	a.Memory, a.Subject = store, "ana"

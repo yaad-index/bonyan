@@ -38,7 +38,7 @@ func TestMemoryClassifiesThroughTheAssembledPolicy(t *testing.T) {
 	require.NotNil(t, c.Memory)
 
 	ctx := context.Background()
-	require.NoError(t, c.Memory.Remember(ctx, "ana", content.KindUser, "prefers mail"))
+	require.NoError(t, c.Memory.Remember(ctx, "ana", content.Provenance{Kind: content.KindUser}, "prefers mail"))
 	got, err := c.Memory.Recall(ctx, "ana", "", 10)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -87,7 +87,7 @@ func TestARegisteredMemoryBackendIsUsedAndClosed(t *testing.T) {
 
 	c, err := r.Assemble(memoryConfig("mine", "1h"))
 	require.NoError(t, err)
-	require.NoError(t, c.Memory.Remember(context.Background(), "ana", content.KindUser, "a fact"))
+	require.NoError(t, c.Memory.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "a fact"))
 	recs, err := b.Recall(context.Background(), "ana", "", 10, time.Time{})
 	require.NoError(t, err)
 	assert.Len(t, recs, 1)

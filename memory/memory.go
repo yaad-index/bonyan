@@ -53,7 +53,11 @@ type Record struct {
 	Session string
 	// Origin is the kind of material the text came from: for a fact, the
 	// material it was extracted from.
-	Origin   content.Kind
+	Origin content.Kind
+	// Server names the tool server remote tool output came from, as the
+	// program registered it, when Origin is content.KindRemoteTool; it is
+	// empty otherwise (ADR 0001 §3, §4).
+	Server   string
 	Text     string
 	At       time.Time
 	Decision Decision
@@ -143,19 +147,21 @@ func NewStore(b Backend, opts Options) (*Store, error) {
 	return s, nil
 }
 
-// Append adds an event to a session's history. origin is the kind of material
-// text came from.
-func (s *Store) Append(ctx context.Context, subject, session string, origin content.Kind, text string) error {
+// Append adds an event to a session's history. from is where text came from:
+// its kind and, for remote tool output, its server; its other fields are not
+// kept.
+func (s *Store) Append(ctx context.Context, subject, session string, from content.Provenance, text string) error {
 	if session == "" {
 		return fmt.Errorf("%w: empty session", ErrInvalid)
 	}
-	return s.write(ctx, Record{Layer: ShortTerm, Subject: subject, Session: session, Origin: origin, Text: text})
+	return s.write(ctx, Record{Layer: ShortTerm, Subject: subject, Session: session, Origin: from.Kind, Server: from.Server, Text: text})
 }
 
-// Remember stores a fact about subject. origin is the kind of material the
-// fact was extracted from.
-func (s *Store) Remember(ctx context.Context, subject string, origin content.Kind, text string) error {
-	return s.write(ctx, Record{Layer: LongTerm, Subject: subject, Origin: origin, Text: text})
+// Remember stores a fact about subject. from is where the material the fact
+// was extracted from came from, as for Append, so the fact is classified again
+// under the same kind and server when it is recalled.
+func (s *Store) Remember(ctx context.Context, subject string, from content.Provenance, text string) error {
+	return s.write(ctx, Record{Layer: LongTerm, Subject: subject, Origin: from.Kind, Server: from.Server, Text: text})
 }
 
 func (s *Store) write(ctx context.Context, r Record) error {
@@ -165,8 +171,11 @@ func (s *Store) write(ctx context.Context, r Record) error {
 	if r.Origin == "" {
 		return fmt.Errorf("%w: empty origin", ErrInvalid)
 	}
+	if r.Server != "" && r.Origin != content.KindRemoteTool {
+		return fmt.Errorf("%w: a server for %s, which no tool server returned", ErrInvalid, r.Origin)
+	}
 	r.At = s.now()
-	r.Decision = Decision{Verdict: s.classify(ctx, r.Origin), Policy: s.name}
+	r.Decision = Decision{Verdict: s.classify(ctx, r.Origin, r.Server), Policy: s.name}
 	_, err := s.backend.Write(ctx, r)
 	return err
 }
@@ -246,20 +255,22 @@ func (s *Store) read(ctx context.Context, recs []Record, layer Layer, subject, s
 		}
 		// The policy runs on every read, whatever the stored decision, so each
 		// recall's decision is made and recorded.
-		now := s.classify(ctx, r.Origin)
+		now := s.classify(ctx, r.Origin, r.Server)
+		from := content.Provenance{Kind: content.KindMemory, Origin: r.Origin, Server: r.Server, ID: r.ID}
 		if r.Decision.Verdict == trust.Trusted && now == trust.Trusted {
-			out = append(out, content.TrustedFrom(content.Provenance{Kind: content.KindMemory, Origin: r.Origin, ID: r.ID}, r.Text))
+			out = append(out, content.TrustedFrom(from, r.Text))
 			continue
 		}
-		out = append(out, content.From(content.Provenance{Kind: content.KindMemory, Origin: r.Origin, ID: r.ID}, r.Text))
+		out = append(out, content.From(from, r.Text))
 	}
 	return out
 }
 
 // classify is the policy's verdict on material from memory that came from
-// origin: trusted only when the policy says so without failing.
-func (s *Store) classify(ctx context.Context, origin content.Kind) trust.Verdict {
-	d, err := s.policy.Classify(ctx, content.Provenance{Kind: content.KindMemory, Origin: origin})
+// origin, and from server for remote tool output: trusted only when the policy
+// says so without failing.
+func (s *Store) classify(ctx context.Context, origin content.Kind, server string) trust.Verdict {
+	d, err := s.policy.Classify(ctx, content.Provenance{Kind: content.KindMemory, Origin: origin, Server: server})
 	if err != nil || d.Verdict != trust.Trusted {
 		return trust.Untrusted
 	}

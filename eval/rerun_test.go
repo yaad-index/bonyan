@@ -348,7 +348,7 @@ func TestTheGrid(t *testing.T) {
 func TestAReRunLeavesMemoryAlone(t *testing.T) {
 	store, err := memory.NewStore(inmem.New(), memory.Options{Retention: time.Hour})
 	require.NoError(t, err)
-	require.NoError(t, store.Remember(context.Background(), "ana", content.KindUser, "find things quickly"))
+	require.NoError(t, store.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "find things quickly"))
 	orig := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
 	orig.Memory, orig.Subject, orig.Session = store, "ana", "s1"
 	run := recorded(t, orig, "find x")
