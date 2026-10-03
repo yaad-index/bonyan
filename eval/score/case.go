@@ -17,6 +17,17 @@ type Case struct {
 	Input content.Untrusted
 	// Expect are the properties the answer must have. Outcome scores each.
 	Expect []Property
+	// Labels are the values a person gave the case's run, so a model-based
+	// evaluator's agreement with people is reported beside its scores
+	// (ADR 0001 §8). Each names an evaluator and a metric, once per case.
+	Labels []Label
+}
+
+// Label is the value a person gave one metric of an evaluator for a case's
+// run.
+type Label struct {
+	Evaluator, Metric string
+	Value             float64
 }
 
 // Property is something an answer is expected to have. Check returns nil when

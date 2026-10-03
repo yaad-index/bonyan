@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/yaad-index/bonyan/agent"
@@ -39,6 +40,26 @@ type Report struct {
 	// Aggregates hold each metric over every case that has it, in the order
 	// the metrics first appear.
 	Aggregates []Aggregate
+	// Agreement holds, for each labelled metric, how the evaluator's scores
+	// agree with the cases' labels, in the order the labels first appear. It
+	// is reported beside the scores and is never a gate.
+	Agreement []Agreement
+}
+
+// Agreement is how an evaluator's scores of one metric agree with the labels
+// people gave it.
+type Agreement struct {
+	Evaluator string
+	Metric    string
+	// N is how many labelled cases the evaluator scored on the metric.
+	N int
+	// Exact is the share of those whose score equals the label, and MAE the
+	// mean absolute difference between score and label. Both are zero when
+	// N is.
+	Exact, MAE float64
+	// Unscored counts the labelled cases the evaluator gave no score for the
+	// metric, because it failed or the run did not hold what it scores.
+	Unscored int
 }
 
 // Result is one case's run and its scores.
@@ -71,7 +92,7 @@ func (r Runner) Run(ctx context.Context, cases []score.Case, sw Switch) (Report,
 	if err := checkNames(r.Evaluators); err != nil {
 		return Report{}, err
 	}
-	if err := checkCases(cases); err != nil {
+	if err := checkCases(cases, r.Evaluators); err != nil {
 		return Report{}, err
 	}
 	on := make([]score.Evaluator, 0, len(r.Evaluators))
@@ -102,7 +123,64 @@ func (r Runner) Run(ctx context.Context, cases []score.Case, sw Switch) (Report,
 		rep.Cases = append(rep.Cases, res)
 	}
 	rep.Aggregates = aggregate(rep.Cases)
+	rep.Agreement = agreement(cases, rep.Cases, on)
 	return rep, nil
+}
+
+// agreement compares each label of cases with the score its run got, for the
+// evaluators that ran.
+func agreement(cases []score.Case, results []Result, ran []score.Evaluator) []Agreement {
+	type key struct{ evaluator, metric string }
+	on := map[string]bool{}
+	for _, e := range ran {
+		on[e.Name()] = true
+	}
+	var order []key
+	byKey := map[key]*Agreement{}
+	for i, c := range cases {
+		for _, l := range c.Labels {
+			if !on[l.Evaluator] {
+				continue
+			}
+			k := key{l.Evaluator, l.Metric}
+			a, ok := byKey[k]
+			if !ok {
+				a = &Agreement{Evaluator: l.Evaluator, Metric: l.Metric}
+				byKey[k] = a
+				order = append(order, k)
+			}
+			got, scored := scoreOf(results[i].Scores, l.Evaluator, l.Metric)
+			if !scored {
+				a.Unscored++
+				continue
+			}
+			a.N++
+			if got == l.Value {
+				a.Exact++
+			}
+			a.MAE += math.Abs(got - l.Value)
+		}
+	}
+	out := make([]Agreement, len(order))
+	for i, k := range order {
+		a := byKey[k]
+		if a.N > 0 {
+			a.Exact /= float64(a.N)
+			a.MAE /= float64(a.N)
+		}
+		out[i] = *a
+	}
+	return out
+}
+
+// scoreOf is the value of an evaluator's metric among scores.
+func scoreOf(scores []score.Score, evaluator, metric string) (float64, bool) {
+	for _, s := range scores {
+		if s.Evaluator == evaluator && s.Metric == metric {
+			return s.Value, true
+		}
+	}
+	return 0, false
 }
 
 // runCase runs the agent on c with a recording of its own and scores the run
@@ -218,8 +296,13 @@ func (s *memSink) reader() *bytes.Reader {
 	return bytes.NewReader(bytes.Clone(s.buf.Bytes()))
 }
 
-// checkCases refuses a case set the report could not tell apart.
-func checkCases(cases []score.Case) error {
+// checkCases refuses a case set the report could not tell apart, and a label
+// for an evaluator the runner does not have.
+func checkCases(cases []score.Case, evaluators []score.Evaluator) error {
+	have := map[string]bool{}
+	for _, e := range evaluators {
+		have[e.Name()] = true
+	}
 	names := map[string]bool{}
 	for _, c := range cases {
 		if c.Name == "" {
@@ -238,6 +321,17 @@ func checkCases(cases []score.Case) error {
 				return fmt.Errorf("eval: case %q has two properties named %q", c.Name, p.Name)
 			}
 			props[p.Name] = true
+		}
+		labels := map[[2]string]bool{}
+		for _, l := range c.Labels {
+			if !have[l.Evaluator] || l.Metric == "" {
+				return fmt.Errorf("eval: case %q has a label for no evaluator the runner has, or for no metric", c.Name)
+			}
+			k := [2]string{l.Evaluator, l.Metric}
+			if labels[k] {
+				return fmt.Errorf("eval: case %q labels %s %s twice", c.Name, l.Evaluator, l.Metric)
+			}
+			labels[k] = true
 		}
 	}
 	return nil

@@ -5,8 +5,8 @@
 // fixed templates. Untrusted text is text from a source the trust policy
 // classifies as untrusted, and it always records where it came from. Under the
 // default policy that is everything else that reaches a model: mail, web pages,
-// feed items, uploads, tool output and memory recalled from any of those (see
-// package trust).
+// feed items, uploads, tool output, a model's output read back into a request
+// and memory recalled from any of those (see package trust).
 //
 // The two are distinct types, and this package offers no way to turn Untrusted
 // into Trusted. Code that needs the characters of untrusted text reads them
@@ -74,6 +74,7 @@ const (
 	KindUser       Kind = "user"        // supplied by an end user or an upload
 	KindTool       Kind = "tool"        // returned by a tool call in the program
 	KindRemoteTool Kind = "remote-tool" // returned by a tool on a tool server
+	KindModel      Kind = "model"       // a model's output read back into a request
 	KindMemory     Kind = "memory"      // recalled memory derived from untrusted material
 )
 
@@ -81,8 +82,8 @@ const (
 type Provenance struct {
 	Kind Kind
 	// Origin is set when Kind is KindMemory: the kind of the untrusted material
-	// the recalled fact was extracted from (fetched, user, tool or remote
-	// tool). It is empty for every other kind.
+	// the recalled fact was extracted from (fetched, user, tool, remote tool
+	// or model). It is empty for every other kind.
 	Origin Kind
 	// ID identifies the specific source (a message id, a URL, a tool call id).
 	// It is for tracing and audit, never for trust decisions.
