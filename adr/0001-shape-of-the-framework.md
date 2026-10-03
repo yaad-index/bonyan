@@ -202,9 +202,10 @@ Two other positions were considered and rejected:
   - every event bonyan writes to a backend is scrubbed of resolved secrets first, so nothing reaches
     a backend, or a backend's own models, that bonyan would not store;
   - a fact a backend derives keeps as its source the kind of the events it was derived from, a
-    user's message or a model's reply, and is recalled under the rule below like any other fact; a
-    fact derived from events of more than one kind is classified under each, the stricter decision
-    winning;
+    user's message or a model's reply, and is recalled under the rule below like any other fact.
+    Its text was written by the backend's own model, so it is classified under each of its source
+    kinds and as model output too, the stricter decision winning: a policy that trusts what users
+    say never trusts a model's account of it;
   - a backend's own model calls are outside bonyan: bonyan neither meters nor records them, so their
     spend is outside a run's budget and what they derive is outside bonyan's recordings and
     evaluation;
@@ -583,3 +584,5 @@ attached in code.
   a name and passing the conformance suite, with no code or dependency of it in the core module;
   memory has a required namespace, applied by bonyan, which qualifies every subject passed to a
   backend, confines a backend's reads and deletions, and keeps programs sharing a backend apart.
+- §4: a fact a backend derives is classified under each of its source kinds and as model output,
+  the stricter decision winning, since the backend's own model wrote its text.
