@@ -161,7 +161,7 @@ type Registry struct {
 	hooks       *slot[hook.Hook]
 	secrets     *slot[secret.Source]
 	sinks       *slot[record.Sink]
-	memories    *slot[memory.Backend]
+	memories    *memorySlot
 	evaluators  *slot[score.Evaluator]
 	queues      *slot[record.Queue]
 	approvals   *slot[approval.Store]
@@ -181,7 +181,7 @@ func New() *Registry {
 		hooks:       newSlot[hook.Hook](SlotHook),
 		secrets:     newSlot[secret.Source](SlotSecret),
 		sinks:       newSlot[record.Sink](SlotRecording),
-		memories:    newSlot[memory.Backend](SlotMemory),
+		memories:    &memorySlot{factories: map[string]MemoryFactory{}},
 		evaluators:  newSlot[score.Evaluator](SlotEvaluator),
 		queues:      newSlot[record.Queue](SlotQueue),
 		approvals:   newSlot[approval.Store](SlotApprovals),
@@ -197,8 +197,8 @@ func New() *Registry {
 	}
 	r.secrets.factories[SecretDir] = dirSource
 	r.sinks.factories[SinkFile] = fileSink
-	r.memories.factories[MemoryInMem] = func(json.RawMessage) (memory.Backend, error) {
-		return inmem.New(), nil
+	r.memories.factories[MemoryInMem] = func(namespace string, _ json.RawMessage) (memory.Backend, error) {
+		return inmem.New(namespace), nil
 	}
 	return r
 }
@@ -269,8 +269,57 @@ func (r *Registry) RegisterSink(name string, f Factory[record.Sink]) error {
 	return r.sinks.register(name, f)
 }
 
+// MemoryFactory builds a memory backend from its configuration options, opened
+// with namespace (ADR 0001 §4).
+type MemoryFactory func(namespace string, options json.RawMessage) (memory.Backend, error)
+
+// memorySlot is the memory slot: its factories take the namespace too.
+type memorySlot struct {
+	factories map[string]MemoryFactory
+}
+
+func (s *memorySlot) register(name string, f MemoryFactory) error {
+	if name == "" {
+		return fmt.Errorf("registry: %s: empty implementation name", SlotMemory)
+	}
+	if f == nil {
+		return fmt.Errorf("registry: %s %q: nil factory", SlotMemory, name)
+	}
+	if _, ok := s.factories[name]; ok {
+		return fmt.Errorf("%w: %s %q", ErrDuplicate, SlotMemory, name)
+	}
+	s.factories[name] = f
+	return nil
+}
+
+func (s *memorySlot) names() []string {
+	out := make([]string, 0, len(s.factories))
+	for n := range s.factories {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// build builds the configured backend, opened with namespace. memory.NewStore
+// refuses one that reports another.
+func (s *memorySlot) build(cfg SlotConfig, namespace string) (memory.Backend, error) {
+	f, ok := s.factories[cfg.Impl]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s %q (registered: %v)", ErrUnknown, SlotMemory, cfg.Impl, s.names())
+	}
+	b, err := f(namespace, cfg.Options)
+	if err != nil {
+		return nil, fmt.Errorf("registry: build %s %q: %w", SlotMemory, cfg.Impl, err)
+	}
+	if isNil(b) {
+		return nil, fmt.Errorf("registry: build %s %q: factory returned no implementation", SlotMemory, cfg.Impl)
+	}
+	return b, nil
+}
+
 // RegisterMemory adds a memory backend under name.
-func (r *Registry) RegisterMemory(name string, f Factory[memory.Backend]) error {
+func (r *Registry) RegisterMemory(name string, f MemoryFactory) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.memories.register(name, f)
@@ -358,9 +407,13 @@ type EvaluationConfig struct {
 	Full        bool       `json:"full,omitempty"`
 }
 
-// MemoryConfig selects the memory backend and how long it keeps records.
+// MemoryConfig selects the memory backend, its namespace and how long it keeps
+// records.
 type MemoryConfig struct {
 	SlotConfig
+	// Namespace is the memory's namespace: programs sharing one backend each
+	// use their own and never see each other's records. It is required.
+	Namespace string `json:"namespace"`
 	// Retention is how long a record is kept, as a Go duration such as
 	// "720h". It is required.
 	Retention string `json:"retention"`
@@ -665,7 +718,10 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		if retention, err = time.ParseDuration(cfg.Memory.Retention); err != nil || retention <= 0 {
 			return Components{}, fmt.Errorf("registry: memory retention %q: must be a positive duration", cfg.Memory.Retention)
 		}
-		if backend, err = r.memories.build(cfg.Memory.SlotConfig); err != nil {
+		if cfg.Memory.Namespace == "" {
+			return Components{}, fmt.Errorf("registry: memory namespace: required")
+		}
+		if backend, err = r.memories.build(cfg.Memory.SlotConfig, cfg.Memory.Namespace); err != nil {
 			return Components{}, err
 		}
 	}
@@ -755,8 +811,11 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 	}
 	out.Trust = guardPolicy(policyCfg.Impl, policy, ev)
 	if backend != nil {
-		store, err := memory.NewStore(backend, memory.Options{Policy: out.Trust, PolicyName: policyCfg.Impl, Retention: retention, Scrubber: out.Secrets.Scrubber()})
+		store, err := memory.NewStore(backend, memory.Options{Policy: out.Trust, PolicyName: policyCfg.Impl, Retention: retention, Scrubber: out.Secrets.Scrubber(), Namespace: cfg.Memory.Namespace})
 		if err != nil {
+			if c, ok := backend.(interface{ Close() error }); ok {
+				_ = c.Close()
+			}
 			_ = out.Close()
 			return Components{}, err
 		}

@@ -9,7 +9,18 @@
 // policy when the record is written. On every read the policy is applied again
 // and the stricter of the two decisions wins, so nothing comes back more
 // trusted than the material it came from. Records older than the retention
-// period are never returned, and Purge deletes them. Every text written is
+// period are never returned, and Purge deletes them.
+//
+// Memory has a namespace, and the Store applies it, not the program and not
+// the backend alone: every subject the Store passes to a backend is qualified
+// by the namespace, escaped so that no subject can name another namespace, and
+// a record whose subject is not one of the namespace's is dropped on read. A
+// backend is opened with the same namespace, so that what it does across
+// subjects, such as deleting what retention expired, stays inside it. Programs
+// sharing one backend each use their own namespace and never see each other's
+// records.
+//
+// Every text written is
 // scrubbed of resolved secrets before it reaches the backend, whatever writes
 // it, so neither a backend nor a backend's own models ever see one.
 //
@@ -21,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -69,7 +81,13 @@ type Record struct {
 // Backend stores records. It holds no rules of its own: the Store decides what
 // is written and how what is read is trusted. Every method must be safe for
 // concurrent use.
+//
+// A backend is opened with a namespace and acts inside it only: it reads,
+// writes and deletes the records of its own namespace, and none of another's,
+// even when several backends share one storage.
 type Backend interface {
+	// Namespace is the namespace the backend was opened with.
+	Namespace() string
 	// Write stores r and returns the ID it assigned.
 	Write(ctx context.Context, r Record) (string, error)
 	// History returns the events of one session of subject written at or
@@ -84,7 +102,7 @@ type Backend interface {
 	Recall(ctx context.Context, subject, query string, limit int, since time.Time) ([]Record, error)
 	// DeleteSubject deletes every record of subject, events and facts alike.
 	DeleteSubject(ctx context.Context, subject string) error
-	// DeleteBefore deletes every record written before t.
+	// DeleteBefore deletes every record of the namespace written before t.
 	DeleteBefore(ctx context.Context, t time.Time) error
 }
 
@@ -93,6 +111,9 @@ var ErrInvalid = errors.New("memory: invalid")
 
 // Options configures a Store.
 type Options struct {
+	// Namespace is the memory's namespace. It is required, and must be the
+	// one the backend was opened with.
+	Namespace string
 	// Policy classifies every record as it is written and again as it is read.
 	// It should come from the registry (registry.GuardPolicy or Assemble), so
 	// its decisions are recorded; the Store treats any error or missing
@@ -119,6 +140,7 @@ type Store struct {
 	retention time.Duration
 	now       func() time.Time
 	scrub     *secret.Scrubber
+	namespace string
 
 	mu       sync.Mutex
 	deleters []deleter
@@ -143,10 +165,16 @@ func NewStore(b Backend, opts Options) (*Store, error) {
 	if b == nil {
 		return nil, fmt.Errorf("%w: no backend", ErrInvalid)
 	}
+	if opts.Namespace == "" {
+		return nil, fmt.Errorf("%w: empty namespace", ErrInvalid)
+	}
+	if got := b.Namespace(); got != opts.Namespace {
+		return nil, fmt.Errorf("%w: the backend was opened with namespace %q, not %q", ErrInvalid, got, opts.Namespace)
+	}
 	if opts.Retention <= 0 {
 		return nil, fmt.Errorf("%w: retention must be positive, got %s", ErrInvalid, opts.Retention)
 	}
-	s := &Store{backend: b, policy: opts.Policy, name: opts.PolicyName, retention: opts.Retention, now: opts.Now, scrub: opts.Scrubber}
+	s := &Store{backend: b, policy: opts.Policy, name: opts.PolicyName, retention: opts.Retention, now: opts.Now, scrub: opts.Scrubber, namespace: opts.Namespace}
 	if s.scrub == nil {
 		s.scrub = secret.NewScrubber()
 	}
@@ -186,6 +214,7 @@ func (s *Store) write(ctx context.Context, r Record) error {
 	if r.Server != "" && r.Origin != content.KindRemoteTool {
 		return fmt.Errorf("%w: a server for %s, which no tool server returned", ErrInvalid, r.Origin)
 	}
+	r.Subject = s.qualify(r.Subject)
 	r.Text = s.scrub.Scrub(r.Text)
 	r.At = s.now()
 	r.Decision = Decision{Verdict: s.classify(ctx, r.Origin, r.Server), Policy: s.name}
@@ -200,7 +229,7 @@ func (s *Store) History(ctx context.Context, subject, session string) ([]content
 	if subject == "" || session == "" {
 		return nil, fmt.Errorf("%w: empty subject or session", ErrInvalid)
 	}
-	recs, err := s.backend.History(ctx, subject, session, s.cutoff())
+	recs, err := s.backend.History(ctx, s.qualify(subject), session, s.cutoff())
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +245,7 @@ func (s *Store) Recall(ctx context.Context, subject, query string, limit int) ([
 	if limit <= 0 {
 		return nil, fmt.Errorf("%w: limit must be positive, got %d", ErrInvalid, limit)
 	}
-	recs, err := s.backend.Recall(ctx, subject, query, limit, s.cutoff())
+	recs, err := s.backend.Recall(ctx, s.qualify(subject), query, limit, s.cutoff())
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +264,7 @@ func (s *Store) DeleteSubject(ctx context.Context, subject string) error {
 		return fmt.Errorf("%w: empty subject", ErrInvalid)
 	}
 	var errs []error
-	if err := s.backend.DeleteSubject(ctx, subject); err != nil {
+	if err := s.backend.DeleteSubject(ctx, s.qualify(subject)); err != nil {
 		errs = append(errs, fmt.Errorf("memory: deleting the subject from the backend: %w", err))
 	}
 	s.mu.Lock()
@@ -256,11 +285,19 @@ func (s *Store) Purge(ctx context.Context) error {
 
 func (s *Store) cutoff() time.Time { return s.now().Add(-s.retention) }
 
+// qualify is subject as the Store passes it to the backend: inside the
+// namespace, each part escaped, so that no namespace and subject can spell
+// another's.
+func (s *Store) qualify(subject string) string {
+	return url.QueryEscape(s.namespace) + "/" + url.QueryEscape(subject)
+}
+
 // read turns what a backend returned into text. A record from another layer,
-// subject or session, or older than the retention period, is left out,
-// whatever the backend did.
+// namespace, subject or session, or older than the retention period, is left
+// out, whatever the backend did.
 func (s *Store) read(ctx context.Context, recs []Record, layer Layer, subject, session string) []content.Text {
 	cutoff := s.cutoff()
+	subject = s.qualify(subject)
 	out := make([]content.Text, 0, len(recs))
 	for _, r := range recs {
 		if r.Layer != layer || r.Subject != subject || r.Session != session || r.At.Before(cutoff) {

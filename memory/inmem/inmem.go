@@ -15,36 +15,65 @@ import (
 	"github.com/yaad-index/bonyan/memory"
 )
 
-// Backend is an in-memory memory.Backend.
-type Backend struct {
+// Storage holds the records of every namespace opened on it.
+type Storage struct {
 	mu      sync.Mutex
 	next    int
-	records []memory.Record
+	records []stored
 }
 
-// New returns an empty backend.
-func New() *Backend { return &Backend{} }
+type stored struct {
+	namespace string
+	r         memory.Record
+}
+
+// NewStorage returns an empty storage.
+func NewStorage() *Storage { return &Storage{} }
+
+// Open returns a backend over s inside namespace.
+func (s *Storage) Open(namespace string) *Backend { return &Backend{s: s, ns: namespace} }
+
+// Backend is an in-memory memory.Backend inside one namespace of a Storage.
+type Backend struct {
+	s  *Storage
+	ns string
+}
+
+// New returns a backend over an empty storage, opened with namespace.
+func New(namespace string) *Backend { return NewStorage().Open(namespace) }
+
+// Namespace is the namespace b was opened with.
+func (b *Backend) Namespace() string { return b.ns }
+
+// each calls fn with every record of b's namespace, under the storage's lock.
+func (b *Backend) each(fn func(r memory.Record)) {
+	for _, st := range b.s.records {
+		if st.namespace == b.ns {
+			fn(st.r)
+		}
+	}
+}
 
 // Write stores r.
 func (b *Backend) Write(_ context.Context, r memory.Record) (string, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.next++
-	r.ID = strconv.Itoa(b.next)
-	b.records = append(b.records, r)
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
+	b.s.next++
+	r.ID = strconv.Itoa(b.s.next)
+	b.s.records = append(b.s.records, stored{namespace: b.ns, r: r})
 	return r.ID, nil
 }
 
 // History returns a session's events in the order they were written.
 func (b *Backend) History(_ context.Context, subject, session string, since time.Time) ([]memory.Record, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
 	var out []memory.Record
-	for _, r := range b.records {
+	b.each(func(r memory.Record) {
 		if r.Layer == memory.ShortTerm && r.Subject == subject && r.Session == session && !r.At.Before(since) {
 			out = append(out, r)
 		}
-	}
+	})
 	return out, nil
 }
 
@@ -52,16 +81,17 @@ func (b *Backend) History(_ context.Context, subject, session string, since time
 // holding the most of its words first and then the newest; an empty query
 // returns the newest facts.
 func (b *Backend) Recall(_ context.Context, subject, query string, limit int, since time.Time) ([]memory.Record, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
 	words := queryWords(query)
 	type scored struct {
 		r     memory.Record
 		score int
 	}
 	var found []scored
-	for _, r := range slices.Backward(b.records) {
-		if r.Layer != memory.LongTerm || r.Subject != subject || r.At.Before(since) {
+	for _, st := range slices.Backward(b.s.records) {
+		r := st.r
+		if st.namespace != b.ns || r.Layer != memory.LongTerm || r.Subject != subject || r.At.Before(since) {
 			continue
 		}
 		text := strings.ToLower(r.Text)
@@ -101,16 +131,16 @@ func queryWords(query string) []string {
 
 // DeleteSubject deletes every record of subject.
 func (b *Backend) DeleteSubject(_ context.Context, subject string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.records = slices.DeleteFunc(b.records, func(r memory.Record) bool { return r.Subject == subject })
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
+	b.s.records = slices.DeleteFunc(b.s.records, func(st stored) bool { return st.namespace == b.ns && st.r.Subject == subject })
 	return nil
 }
 
-// DeleteBefore deletes every record written before t.
+// DeleteBefore deletes every record of the namespace written before t.
 func (b *Backend) DeleteBefore(_ context.Context, t time.Time) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.records = slices.DeleteFunc(b.records, func(r memory.Record) bool { return r.At.Before(t) })
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
+	b.s.records = slices.DeleteFunc(b.s.records, func(st stored) bool { return st.namespace == b.ns && st.r.At.Before(t) })
 	return nil
 }

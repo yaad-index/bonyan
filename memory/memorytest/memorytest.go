@@ -1,8 +1,10 @@
 // Package memorytest is the conformance suite every memory backend must pass
 // (ADR 0001 §4). It proves a backend implements what the Store relies on:
 // records come back as written, deletion by subject removes events and facts,
-// reads honour the retention cutoff, and DeleteBefore removes what is older. It
-// cannot prove that a given deletion on a live external store happened.
+// reads honour the retention cutoff, DeleteBefore removes what is older, and
+// backends opened with different namespaces on one storage never see or delete
+// each other's records. It cannot prove that a given deletion on a live
+// external store happened.
 package memorytest
 
 import (
@@ -19,8 +21,13 @@ import (
 	"github.com/yaad-index/bonyan/trust"
 )
 
-// Run runs the suite. newBackend returns an empty backend for each test.
-func Run(t *testing.T, newBackend func(t *testing.T) memory.Backend) {
+// Open opens a backend inside a namespace, over one storage: every backend
+// one Open returns shares it.
+type Open func(namespace string) memory.Backend
+
+// Run runs the suite. newStorage returns an Open over an empty storage for each
+// test.
+func Run(t *testing.T, newStorage func(t *testing.T) Open) {
 	t.Helper()
 	for _, c := range []struct {
 		name string
@@ -36,8 +43,46 @@ func Run(t *testing.T, newBackend func(t *testing.T) memory.Backend) {
 		{"ReadsHonourTheCutoff", readsHonourTheCutoff},
 		{"DeleteBeforeRemovesOlderRecords", deleteBeforeRemovesOlderRecords},
 	} {
-		t.Run(c.name, func(t *testing.T) { c.test(t, newBackend(t)) })
+		t.Run(c.name, func(t *testing.T) { c.test(t, newStorage(t)("suite")) })
 	}
+	t.Run("NamespacesNeverSeeEachOther", func(t *testing.T) { namespacesNeverSeeEachOther(t, newStorage(t)) })
+}
+
+// namespacesNeverSeeEachOther opens two namespaces on one storage and writes
+// the same subject in both: neither reads the other's records, and neither
+// deletes them, by subject or by age.
+func namespacesNeverSeeEachOther(t *testing.T, open Open) {
+	a, b := open("ns-a"), open("ns-b")
+	assert.Equal(t, "ns-a", a.Namespace())
+	assert.Equal(t, "ns-b", b.Namespace())
+	write(t, a, event("ana", "s1", "a's event", start), fact("ana", "a's fact", start))
+	write(t, b, event("ana", "s1", "b's event", start), fact("ana", "b's fact", start))
+	for _, c := range []struct {
+		b    memory.Backend
+		want string
+	}{{a, "a's"}, {b, "b's"}} {
+		h, err := c.b.History(ctx, "ana", "s1", never)
+		require.NoError(t, err)
+		assert.Equal(t, []string{c.want + " event"}, texts(h))
+		f, err := c.b.Recall(ctx, "ana", "", 10, never)
+		require.NoError(t, err)
+		assert.Equal(t, []string{c.want + " fact"}, texts(f))
+		f, err = c.b.Recall(ctx, "ana", "fact", 10, never)
+		require.NoError(t, err)
+		assert.Equal(t, []string{c.want + " fact"}, texts(f), "a query too")
+	}
+
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	h, err := a.History(ctx, "ana", "s1", never)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a's event"}, texts(h), "untouched by the other's deletes")
+	f, err := a.Recall(ctx, "ana", "", 10, never)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a's fact"}, texts(f))
+	f, err = b.Recall(ctx, "ana", "", 10, never)
+	require.NoError(t, err)
+	assert.Empty(t, f)
 }
 
 var (

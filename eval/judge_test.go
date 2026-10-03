@@ -118,7 +118,7 @@ func TestGroundednessJudgesTheAnswerAgainstTheContext(t *testing.T) {
 // A claim the judge finds unsupported may rest on context the recording left
 // out, so it is counted as unverifiable, and what was left out is never sent.
 func TestAClaimMayRestOnContextTheRecordingLeftOut(t *testing.T) {
-	store, err := memory.NewStore(inmem.New(), memory.Options{Retention: time.Hour})
+	store, err := memory.NewStore(inmem.New("test"), memory.Options{Namespace: "test", Retention: time.Hour})
 	require.NoError(t, err)
 	require.NoError(t, store.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "MEMORY-3b9 find things"))
 	a := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: resultSeen})

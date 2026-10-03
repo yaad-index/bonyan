@@ -25,7 +25,7 @@ import (
 func memoryConfig(impl, retention string) registry.Config {
 	return registry.Config{
 		Chat:   registry.SlotConfig{Impl: "basic"},
-		Memory: &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: impl}, Retention: retention},
+		Memory: &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: impl}, Namespace: "test", Retention: retention},
 	}
 }
 
@@ -80,15 +80,15 @@ func (c *closing) Close() error {
 
 func TestARegisteredMemoryBackendIsUsedAndClosed(t *testing.T) {
 	r := newRegistry(t)
-	b := &closing{Backend: inmem.New()}
-	require.NoError(t, r.RegisterMemory("mine", func(json.RawMessage) (memory.Backend, error) { return b, nil }))
+	b := &closing{Backend: inmem.New("test")}
+	require.NoError(t, r.RegisterMemory("mine", func(string, json.RawMessage) (memory.Backend, error) { return b, nil }))
 	assert.Contains(t, r.Names(registry.SlotMemory), "mine")
 	assert.Contains(t, r.Names(registry.SlotMemory), registry.MemoryInMem)
 
 	c, err := r.Assemble(memoryConfig("mine", "1h"))
 	require.NoError(t, err)
 	require.NoError(t, c.Memory.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "a fact"))
-	recs, err := b.Recall(context.Background(), "ana", "", 10, time.Time{})
+	recs, err := b.Recall(context.Background(), "test/ana", "", 10, time.Time{})
 	require.NoError(t, err)
 	assert.Len(t, recs, 1)
 
@@ -140,4 +140,30 @@ func TestTheAssembledMemoryScrubsWithTheProgramsSecrets(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.NotContains(t, got[0].(content.Untrusted).Raw(), "SECRET-b52")
+}
+
+// Memory needs a namespace, and the backend must be opened with it.
+func TestMemoryNeedsANamespace(t *testing.T) {
+	r := newRegistry(t)
+	called := false
+	require.NoError(t, r.RegisterMemory("counted", func(ns string, _ json.RawMessage) (memory.Backend, error) { called = true; return inmem.New(ns), nil }))
+	cfg := memoryConfig("counted", "1h")
+	cfg.Memory.Namespace = ""
+	_, err := r.Assemble(cfg)
+	require.ErrorContains(t, err, "namespace")
+	assert.False(t, called, "no backend is opened without a namespace")
+
+	r = newRegistry(t)
+	elsewhere := &closing{Backend: inmem.New("other")}
+	require.NoError(t, r.RegisterMemory("elsewhere", func(string, json.RawMessage) (memory.Backend, error) { return elsewhere, nil }))
+	_, err = r.Assemble(memoryConfig("elsewhere", "1h"))
+	require.ErrorContains(t, err, `opened with namespace "other", not "test"`)
+	assert.True(t, elsewhere.closed, "the refused backend is closed")
+
+	r = newRegistry(t)
+	var got string
+	require.NoError(t, r.RegisterMemory("seen", func(ns string, _ json.RawMessage) (memory.Backend, error) { got = ns; return inmem.New(ns), nil }))
+	_, err = r.Assemble(memoryConfig("seen", "1h"))
+	require.NoError(t, err)
+	assert.Equal(t, "test", got, "the factory is given the configured namespace")
 }

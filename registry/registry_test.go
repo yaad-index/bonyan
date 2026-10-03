@@ -176,7 +176,7 @@ func TestEveryPartIsWrapped(t *testing.T) {
 		Chat:       registry.SlotConfig{Impl: "basic"},
 		Embedder:   &registry.SlotConfig{Impl: "basic"},
 		Classifier: &registry.SlotConfig{Impl: "basic"},
-		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"},
+		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Namespace: "test", Retention: "720h"},
 		Evaluators: []registry.SlotConfig{{Impl: "basic"}},
 		Evaluation: &registry.EvaluationConfig{Queue: registry.SlotConfig{Impl: registry.QueueInMem, Options: json.RawMessage(`{"retention":"1h"}`)}, Rate: 1},
 		Approvals:  &registry.SlotConfig{Impl: registry.ApprovalsInMem},
@@ -371,7 +371,7 @@ func queueRun(c registry.Components, id, subject string) {
 func TestLiveEvaluationIsAssembled(t *testing.T) {
 	c, err := newRegistry(t).Assemble(registry.Config{
 		Chat:       registry.SlotConfig{Impl: "basic"},
-		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Retention: "720h"},
+		Memory:     &registry.MemoryConfig{SlotConfig: registry.SlotConfig{Impl: registry.MemoryInMem}, Namespace: "test", Retention: "720h"},
 		Evaluation: evaluation(1, "1h"),
 	})
 	require.NoError(t, err)

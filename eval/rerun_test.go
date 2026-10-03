@@ -346,7 +346,7 @@ func TestTheGrid(t *testing.T) {
 // A re-run neither recalls nor writes memory, and says when the recording
 // left memory out.
 func TestAReRunLeavesMemoryAlone(t *testing.T) {
-	store, err := memory.NewStore(inmem.New(), memory.Options{Retention: time.Hour})
+	store, err := memory.NewStore(inmem.New("test"), memory.Options{Namespace: "test", Retention: time.Hour})
 	require.NoError(t, err)
 	require.NoError(t, store.Remember(context.Background(), "ana", content.Provenance{Kind: content.KindUser}, "find things quickly"))
 	orig := searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"})
