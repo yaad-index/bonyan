@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/stretchr/testify v1.12.1
 	github.com/tiktoken-go/tokenizer v0.8.1
-	github.com/yaad-index/bonyan v0.0.0-00010101000000-000000000000
+	github.com/yaad-index/bonyan v0.1.0
 )
 
 require (
