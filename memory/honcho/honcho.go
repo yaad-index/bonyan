@@ -17,8 +17,10 @@
 //
 // Recall reads only the user's own sessions and the conclusions the user's
 // peer holds about itself, and checks every result again on read: a message
-// from a session or peer not the user's, or a conclusion about another peer,
-// is dropped.
+// from a session or peer not the user's, a session or message the service
+// names another workspace for, or a conclusion about another peer, is
+// dropped. A conclusion names no workspace, so it is checked by its peers
+// only.
 //
 // The service cannot delete a peer or a single message. Deleting a subject
 // deletes the user's sessions, every conclusion the user's peer holds or is
@@ -537,7 +539,8 @@ func (b *Backend) ownMessage(peer string, m message) bool {
 
 // inWorkspace reports whether a result the service names a workspace for is
 // from the Backend's. The service puts the workspace in every request's path;
-// this checks the answer too.
+// this checks the answer too. A conclusion names no workspace, so it is
+// checked by its peers only.
 func (b *Backend) inWorkspace(ws string) bool { return ws == "" || ws == b.ws }
 
 // read returns the records of every generation of peer's sessions under k,
@@ -814,7 +817,7 @@ func (b *Backend) drained(ctx context.Context, peer string) error {
 			busy = true
 		}
 		for _, s := range ss {
-			if p, _, _, ok := parseSession(s.ID); ok && p == peer {
+			if p, _, _, ok := parseSession(s.ID); ok && p == peer && b.inWorkspace(s.Workspace) {
 				busy = true
 			}
 		}
