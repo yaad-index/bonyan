@@ -118,11 +118,22 @@ type workspace struct {
 }
 
 type session struct {
-	ID string `json:"id"`
+	ID        string `json:"id"`
+	Workspace string `json:"workspace_id"`
+	// Active is false for a session the service has marked deleted and not
+	// yet removed: it removes a deleted session's messages later, from its
+	// queue, and lists a peer's sessions with such ones included.
+	Active *bool `json:"is_active"`
 }
+
+// active reports whether s is not deleted. A session the service reports no
+// state for is taken as active.
+func (s session) active() bool { return s.Active == nil || *s.Active }
 
 type message struct {
 	ID        string         `json:"id"`
+	Workspace string         `json:"workspace_id"`
+	Session   string         `json:"session_id"`
 	Content   string         `json:"content"`
 	PeerID    string         `json:"peer_id"`
 	Metadata  map[string]any `json:"metadata"`

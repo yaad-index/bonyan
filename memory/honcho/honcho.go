@@ -23,16 +23,19 @@
 // The service cannot delete a peer or a single message. Deleting a subject
 // deletes the user's sessions, every conclusion the user's peer holds or is
 // the subject of, and the user's peer card and the program's card about the
-// user, and empties the peer's metadata; then it waits for the service's
-// deriver to finish the user's work and deletes the conclusions again, so a
-// fact derived while the erase ran does not remain. The peer itself remains,
+// user, and empties the peer's metadata; then it waits until the service has
+// removed the user's sessions and its deriver has finished the user's work,
+// and deletes the conclusions again, so a fact derived while the erase ran
+// does not remain. The peer itself remains,
 // empty, named by the hex of the subject: that the subject once had memory in
 // the namespace is the residue of an erase.
 //
 // The service deletes messages only a whole session at a time, so deleting
 // what retention expired rewrites a session that straddles the cut: its newer
 // messages are written to a new generation of the session first, and the older
-// generations are deleted after. A purge interrupted between the two leaves
+// generations are deleted after. The service marks a deleted session at once
+// and removes its messages later, from its queue; a marked session is never
+// read, and its name is not used again. A purge interrupted between the two leaves
 // both, read as one with nothing doubled, and the next purge finishes it; it
 // never loses a newer record. Only writes made through the same Backend wait
 // for a rewrite: a write from another process to a session being rewritten can
@@ -428,25 +431,40 @@ func parseSession(id string) (peer, k string, gen int, ok bool) {
 }
 
 // generations lists the generations of peer's sessions, oldest first, by key.
-// Only sessions named for peer count, whatever the service lists.
+// Only sessions named for peer count, whatever the service lists, and a
+// session the service has marked deleted does not.
 func (b *Backend) generations(ctx context.Context, peer string) (map[string][]int, error) {
+	gens, _, err := b.sessionsOf(ctx, peer)
+	return gens, err
+}
+
+// sessionsOf lists peer's sessions: the generations of those not deleted,
+// oldest first, by key, and the highest generation the service still holds
+// under each key, deleted ones included. A deleted session's name cannot be
+// used again until the service has removed it.
+func (b *Backend) sessionsOf(ctx context.Context, peer string) (map[string][]int, map[string]int, error) {
+	gens, top := map[string][]int{}, map[string]int{}
 	ss, err := b.c.peerSessions(ctx, b.ws, peer)
 	if errors.Is(err, errNotFound) {
-		return map[string][]int{}, nil
+		return gens, top, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	out := map[string][]int{}
 	for _, s := range ss {
-		if p, k, gen, ok := parseSession(s.ID); ok && p == peer {
-			out[k] = append(out[k], gen)
+		p, k, gen, ok := parseSession(s.ID)
+		if !ok || p != peer || !b.inWorkspace(s.Workspace) {
+			continue
+		}
+		top[k] = max(top[k], gen)
+		if s.active() {
+			gens[k] = append(gens[k], gen)
 		}
 	}
-	for k := range out {
-		slices.Sort(out[k])
+	for k := range gens {
+		slices.Sort(gens[k])
 	}
-	return out, nil
+	return gens, top, nil
 }
 
 // Write stores r as a message, in the newest generation of its session. When
@@ -475,12 +493,14 @@ func (b *Backend) write(ctx context.Context, peer string, r memory.Record) (stri
 	if err := b.ensure(ctx, peer); err != nil {
 		return "", err
 	}
-	gens, err := b.generations(ctx, peer)
+	gens, top, err := b.sessionsOf(ctx, peer)
 	if err != nil {
 		return "", err
 	}
 	k := key(r)
-	gen := 1
+	// The newest generation not deleted, or one past every generation the
+	// service still holds, whose names it would refuse.
+	gen := top[k] + 1
 	if g := gens[k]; len(g) > 0 {
 		gen = g[len(g)-1]
 	}
@@ -509,8 +529,16 @@ func (b *Backend) write(ctx context.Context, peer string, r memory.Record) (stri
 }
 
 // ownMessage reports whether m, read from one of peer's sessions, is one of
-// that user's conversation: sent by the user's peer or the program's.
-func ownMessage(peer string, m message) bool { return m.PeerID == peer || m.PeerID == agentPeer }
+// that user's conversation: sent by the user's peer or the program's, in the
+// Backend's workspace.
+func (b *Backend) ownMessage(peer string, m message) bool {
+	return (m.PeerID == peer || m.PeerID == agentPeer) && b.inWorkspace(m.Workspace)
+}
+
+// inWorkspace reports whether a result the service names a workspace for is
+// from the Backend's. The service puts the workspace in every request's path;
+// this checks the answer too.
+func (b *Backend) inWorkspace(ws string) bool { return ws == "" || ws == b.ws }
 
 // read returns the records of every generation of peer's sessions under k,
 // each once, oldest first.
@@ -526,7 +554,7 @@ func (b *Backend) read(ctx context.Context, peer, subject, k string, gens []int)
 			return nil, err
 		}
 		for _, m := range msgs {
-			if !ownMessage(peer, m) {
+			if !b.ownMessage(peer, m) {
 				continue
 			}
 			r, ok := recordOf(subject, m)
@@ -615,7 +643,7 @@ func (b *Backend) Recall(ctx context.Context, subject, query string, limit int, 
 			return nil, err
 		}
 		for _, m := range msgs {
-			if !ownMessage(peer, m) {
+			if !b.ownMessage(peer, m) {
 				continue
 			}
 			if r, ok := recordOf(subject, m); ok && keep(r) {
@@ -689,10 +717,13 @@ func wordsOf(s string) []string {
 // DeleteSubject erases subject from the workspace (ADR 0003 §3): its sessions,
 // with every record in them; every conclusion its peer holds or is the
 // subject of; its peer card and the program's card about it; and its peer's
-// metadata. It then waits for the service's deriver to finish the subject's
-// work and deletes the conclusions again, so nothing derived while it ran
-// remains. Waiting longer than DeleteWait fails, and deleting again finishes
-// the erase. The peer itself remains, empty: the service cannot delete one.
+// metadata. The service marks a deleted session at once and removes its
+// messages later, from its queue, so the erase waits until none of the
+// subject's sessions is left at all, and until the service's deriver has
+// finished the subject's work, and then deletes the conclusions again, so
+// nothing derived while it ran remains. Waiting longer than DeleteWait fails,
+// and deleting again finishes the erase. The peer itself remains, empty: the
+// service cannot delete one.
 func (b *Backend) DeleteSubject(ctx context.Context, subject string) error {
 	peer, err := peerOf(subject)
 	if err != nil {
@@ -763,14 +794,30 @@ func (b *Backend) deleteConclusions(ctx context.Context, peer string) error {
 	return nil
 }
 
-// drained waits until the service's queue holds no work sent by peer or
-// observed by it, at most DeleteWait.
+// drained waits, at most DeleteWait, until the service lists none of peer's
+// sessions, deleted ones included, which it does once it has removed them,
+// and its queue holds no deriver work sent by peer or observed by it. The
+// queue's status does not count the removal of a deleted session, so the two
+// are waited for separately.
 func (b *Backend) drained(ctx context.Context, peer string) error {
 	ctx, cancel := context.WithTimeout(ctx, b.deleteWait)
 	defer cancel()
 	pause := 50 * time.Millisecond
 	for {
 		busy := false
+		ss, err := b.c.peerSessions(ctx, b.ws, peer)
+		switch {
+		case errors.Is(err, errNotFound):
+		case err != nil && ctx.Err() == nil:
+			return err
+		case err != nil:
+			busy = true
+		}
+		for _, s := range ss {
+			if p, _, _, ok := parseSession(s.ID); ok && p == peer {
+				busy = true
+			}
+		}
 		for _, q := range []url.Values{{"sender_id": {peer}}, {"observer_id": {peer}}} {
 			n, err := b.c.queued(ctx, b.ws, q)
 			if err != nil && !errors.Is(err, errNotFound) {
@@ -786,7 +833,7 @@ func (b *Backend) drained(ctx context.Context, peer string) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("honcho: the service's deriver still had work for the subject after %s; deleting the subject again finishes the erase", b.deleteWait)
+			return fmt.Errorf("honcho: the service had not removed the subject's sessions or finished its deriver work after %s; deleting the subject again finishes the erase", b.deleteWait)
 		case <-time.After(pause):
 		}
 		pause = min(2*pause, time.Second)
@@ -857,7 +904,7 @@ func (b *Backend) rewrite(ctx context.Context, peer, k string, gens []int, t tim
 	old := false
 	for _, m := range all {
 		r, ok := recordOf("", m)
-		if !ok || !ownMessage(peer, m) || seen[r.ID] {
+		if !ok || !b.ownMessage(peer, m) || seen[r.ID] {
 			continue
 		}
 		seen[r.ID] = true

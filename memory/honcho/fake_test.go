@@ -49,6 +49,16 @@ type fake struct {
 	busyAs string
 	// filters records the filters of every conclusion list or query.
 	filters []map[string]any
+	// lag is how many requests a deleted session outlives: the service marks
+	// it inactive at once, lists it among a peer's sessions as inactive,
+	// refuses its name to a new session, and removes it later, from its
+	// queue. A negative lag never removes it.
+	lag   int
+	ticks int
+	// foreign, when set, is a session name listed among every peer's
+	// sessions as another workspace's, as a service scoping a lookup wrongly
+	// would.
+	foreign string
 	// calls records every request as "METHOD path".
 	calls []string
 }
@@ -65,8 +75,10 @@ type fakeWorkspace struct {
 }
 
 type fakeSession struct {
-	peers    map[string]any
-	messages []map[string]any
+	peers     map[string]any
+	messages  []map[string]any
+	deleted   bool
+	deletedAt int
 }
 
 type fakeConclusion struct {
@@ -78,7 +90,7 @@ const fakePage = 3
 
 func newFake(t *testing.T) (*fake, *httptest.Server) {
 	t.Helper()
-	f := &fake{ws: map[string]*fakeWorkspace{}, queue: map[string]int{}, now: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
+	f := &fake{ws: map[string]*fakeWorkspace{}, queue: map[string]int{}, lag: 3, now: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -129,6 +141,8 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	f.ticks++
+	f.reap()
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/v3/workspaces"), "/")
@@ -199,8 +213,11 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if _, member := s.peers[p[3]]; member || f.leaky {
-				out = append(out, map[string]any{"id": id})
+				out = append(out, map[string]any{"id": id, "is_active": !s.deleted, "workspace_id": p[1]})
 			}
+		}
+		if f.foreign != "" {
+			out = append(out, map[string]any{"id": f.foreign, "is_active": true, "workspace_id": "another"})
 		}
 		paged(w, r, out)
 	case len(p) == 4 && p[2] == "queue" && p[3] == "status":
@@ -237,7 +254,11 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, code, map[string]any{"id": body["id"]})
 	case len(p) == 3 && p[2] == "sessions":
 		id := body["id"].(string)
-		if _, ok := ws.sessions[id]; ok {
+		if s, ok := ws.sessions[id]; ok {
+			if s.deleted {
+				write(w, http.StatusNotFound, nil)
+				return
+			}
 			write(w, http.StatusOK, map[string]any{"id": id})
 			return
 		}
@@ -254,17 +275,18 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(p) == 4 && p[2] == "sessions" && p[3] == "list":
 		var out []map[string]any
 		for _, id := range ws.order {
-			if _, ok := ws.sessions[id]; ok {
-				out = append(out, map[string]any{"id": id})
+			if s, ok := ws.sessions[id]; ok && !s.deleted {
+				out = append(out, map[string]any{"id": id, "is_active": true})
 			}
 		}
 		paged(w, r, out)
 	case len(p) == 4 && p[2] == "sessions" && r.Method == http.MethodDelete:
-		if _, ok := ws.sessions[p[3]]; !ok {
+		s, ok := ws.sessions[p[3]]
+		if !ok || s.deleted {
 			write(w, http.StatusNotFound, nil)
 			return
 		}
-		delete(ws.sessions, p[3])
+		s.deleted, s.deletedAt = true, f.ticks
 		write(w, http.StatusAccepted, nil)
 	case len(p) == 5 && p[2] == "sessions":
 		s, ok := ws.sessions[p[3]]
@@ -274,6 +296,10 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch p[4] {
 		case "messages":
+			if s.deleted {
+				write(w, http.StatusNotFound, nil)
+				return
+			}
 			batch := body["messages"].([]any)
 			if len(batch) > 100 {
 				write(w, http.StatusUnprocessableEntity, map[string]string{"detail": "too many messages"})
@@ -283,6 +309,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for _, m := range batch {
 				m := m.(map[string]any)
 				m["id"] = f.id()
+				m["workspace_id"], m["session_id"] = p[1], p[3]
 				if _, ok := m["metadata"]; !ok {
 					m["metadata"] = map[string]any{}
 				}
@@ -413,6 +440,34 @@ func conclusionJSON(c fakeConclusion) map[string]any {
 	return map[string]any{"id": c.ID, "content": c.Content, "observer_id": c.Observer, "observed_id": c.Observed, "created_at": c.At.Format(time.RFC3339Nano)}
 }
 
+// reap removes the deleted sessions whose lag has run out, as the service's
+// queue does.
+func (f *fake) reap() {
+	if f.lag < 0 {
+		return
+	}
+	for _, ws := range f.ws {
+		for id, s := range ws.sessions {
+			if s.deleted && f.ticks-s.deletedAt > f.lag {
+				delete(ws.sessions, id)
+			}
+		}
+	}
+}
+
+// removed reports whether no session, deleted or not, is left in ws under
+// the given name prefix.
+func (f *fake) removed(ws, prefix string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id := range f.ws[ws].sessions {
+		if strings.HasPrefix(id, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
 // workspaces lists the fake's workspaces.
 func (f *fake) workspaces() []string {
 	f.mu.Lock()
@@ -425,13 +480,15 @@ func (f *fake) workspaces() []string {
 	return out
 }
 
-// sessions lists a workspace's sessions.
+// sessions lists a workspace's sessions not deleted.
 func (f *fake) sessions(ws string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []string
-	for id := range f.ws[ws].sessions {
-		out = append(out, id)
+	for id, s := range f.ws[ws].sessions {
+		if !s.deleted {
+			out = append(out, id)
+		}
 	}
 	slices.Sort(out)
 	return out

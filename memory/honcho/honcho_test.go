@@ -732,7 +732,7 @@ func TestAnEraseFailsWhileTheDeriverHoldsWork(t *testing.T) {
 	_, err = b.Write(ctx, event("s1", "hello", start))
 	require.NoError(t, err)
 	f.queue["observer_id="+ana] = 1 << 30
-	require.ErrorContains(t, b.DeleteSubject(ctx, "ana"), "deriver still had work")
+	require.ErrorContains(t, b.DeleteSubject(ctx, "ana"), "finished its deriver work")
 	f.mu.Lock()
 	f.queue["observer_id="+ana] = 0
 	f.mu.Unlock()
@@ -832,4 +832,100 @@ func TestARewriteCopiesOnlyTheUsersMessages(t *testing.T) {
 	for _, m := range f.messages(ws, gens[0]) {
 		assert.NotEqual(t, "planted", m["content"])
 	}
+}
+
+// The service marks a deleted session at once and removes it later. Reads
+// never see a marked session, so what retention or an erase deleted is gone
+// for the reader at once, however long the service takes to remove it.
+func TestReadsSkipASessionTheServiceHasNotRemovedYet(t *testing.T) {
+	f, srv := newFake(t)
+	f.lag = -1
+	b := open(t, f, srv.URL)
+	for i, text := range []string{"old", "new"} {
+		_, err := b.Write(ctx, event("s1", text, start.Add(time.Duration(i)*2*time.Hour)))
+		require.NoError(t, err)
+	}
+	_, err := b.Write(ctx, event("s2", "old in s2", start))
+	require.NoError(t, err)
+	_, err = b.Write(ctx, memory.Record{Layer: memory.LongTerm, Subject: "ana", Origin: content.KindUser, Text: "old fact", At: start})
+	require.NoError(t, err)
+
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new"}, texts(h))
+	h, err = b.History(ctx, "ana", "s2", time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, h)
+	got, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	got, err = b.Recall(ctx, "ana", "old fact", 10, time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// A write to a session retention emptied goes to a generation past the
+// deleted one, whose name the service refuses until it has removed it.
+func TestAWriteAfterRetentionEmptiedASession(t *testing.T) {
+	f, srv := newFake(t)
+	f.lag = -1
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "old", start))
+	require.NoError(t, err)
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	_, err = b.Write(ctx, event("s1", "new", start.Add(2*time.Hour)))
+	require.NoError(t, err)
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new"}, texts(h))
+	s1 := hex.EncodeToString([]byte("s1"))
+	assert.Equal(t, []string{ana + "--" + s1 + "-g2"}, f.sessions(onlyWorkspace(t, f)))
+}
+
+// An erase returns only once the service has removed the subject's sessions,
+// and fails, saying so, when it has not within the wait.
+func TestAnEraseWaitsUntilTheServiceRemovesTheSessions(t *testing.T) {
+	f, srv := newFake(t)
+	f.lag = 20
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	ws := onlyWorkspace(t, f)
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+	assert.True(t, f.removed(ws, ana+"--"), "every session removed, not only marked")
+
+	f2, srv2 := newFake(t)
+	f2.lag = -1
+	b2, err := honcho.Open(honcho.Options{URL: srv2.URL, Namespace: "test", DeleteWait: 200 * time.Millisecond})
+	require.NoError(t, err)
+	_, err = b2.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	require.ErrorContains(t, b2.DeleteSubject(ctx, "ana"), "had not removed the subject's sessions")
+	h, err := b2.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, h, "the reader sees nothing all the same")
+}
+
+// A session or message the service names another workspace for is not the
+// Backend's, whatever lookup returned it: a write does not count the session's
+// generation, and a read drops the message.
+func TestAResultFromAnotherWorkspaceIsDropped(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "mine", start))
+	require.NoError(t, err)
+	ws := onlyWorkspace(t, f)
+	s1 := hex.EncodeToString([]byte("s1"))
+	f.plant(ws, ana+"--"+s1+"-g1", map[string]any{
+		"content": "from elsewhere", "peer_id": ana, "workspace_id": "another", "created_at": start.Format(time.RFC3339),
+		"metadata": map[string]any{"bonyan": map[string]any{"layer": "short-term", "session": "s1", "origin": "user", "verdict": 2}},
+	})
+	f.foreign = ana + "--" + s1 + "-g9"
+	_, err = b.Write(ctx, event("s1", "mine too", start.Add(time.Minute)))
+	require.NoError(t, err)
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"mine", "mine too"}, texts(h))
+	assert.Equal(t, []string{ana + "--" + s1 + "-g1"}, f.sessions(ws), "the other workspace's generation is not counted")
 }
