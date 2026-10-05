@@ -64,9 +64,9 @@ Every call the backend makes names its one workspace. A token scoped to that wor
 ### 6. Migration
 
 - The new layout does not read workspaces in the old one. Their names begin with the new default workspace's name followed by `--`, so they never collide with it, but the new version never lists or opens them.
-- A program that stored memory with the old layout **deletes it before upgrading**, using the old version: deleting each subject deletes its workspace; deleting everything written before a time after the last write empties every workspace but leaves them, with their peers. Its token could already create and delete workspaces, since the old layout required that. The release notes of the version that changes the layout say so.
+- A program that stored memory with the old layout **deletes it before upgrading**, using the old version: deleting each subject deletes its workspace; deleting everything written before a time after the last write empties every workspace but leaves them, with their peers. A program could store memory in the old layout only with a token that created workspaces, but that is not proof it may delete them or delete the derived facts in them. Where it may not, the operator deletes the old workspaces with a token that may, and checks that none remain before upgrading. The release notes of the version that changes the layout say so.
 - Memory is not moved from the old layout to the new one. A migration would have to copy messages with their times and metadata, and lose the derived facts, which are formed again only from new messages.
-- This is a breaking change to the backend module, released as a new minor version before 1.0 (ADR 0002).
+- This is a breaking change to the backend module, released as a new minor version before 1.0 (ADR 0001, Consequences).
 
 ## Consequences
 
