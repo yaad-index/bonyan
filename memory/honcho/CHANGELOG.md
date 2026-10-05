@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/yaad-index/bonyan/compare/memory/honcho/v0.2.0...memory/honcho/v0.2.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **memory/honcho:** bring an existing workspace's deriver setting to the Backend's ([#75](https://github.com/yaad-index/bonyan/issues/75)) ([64efcaf](https://github.com/yaad-index/bonyan/commit/64efcaf96cb7a961744323c2cbf24df16d498c1a))
+* **memory/honcho:** wait only for the subject's own workspace when erasing ([#73](https://github.com/yaad-index/bonyan/issues/73)) ([3b9b810](https://github.com/yaad-index/bonyan/commit/3b9b810bff4b01942fb01f0b6b68720adbbd24a3))
+
 ## [0.2.0](https://github.com/yaad-index/bonyan/compare/memory/honcho/v0.1.0...memory/honcho/v0.2.0) (2026-10-05)
 
 
