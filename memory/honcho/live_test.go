@@ -10,11 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/honcho"
 	"github.com/yaad-index/bonyan/memory/memorytest"
+	"github.com/yaad-index/bonyan/trust"
 )
 
 // livePrefix starts every workspace the live tests make, so they can be told
@@ -22,8 +25,10 @@ import (
 const livePrefix = "bonyan-livetest"
 
 // liveURL is the running service the live tests use, from
-// BONYAN_HONCHO_URL; without it they are skipped. They run with the deriver
-// off, so they make no model calls beyond the service's embeddings.
+// BONYAN_HONCHO_URL; without it they are skipped. BONYAN_HONCHO_TOKEN, when
+// the service requires one, must reach every workspace: the tests make and
+// remove workspaces of their own. They run with the deriver off, so they make
+// no model calls beyond the service's embeddings.
 func liveURL(t *testing.T) string {
 	t.Helper()
 	u := os.Getenv("BONYAN_HONCHO_URL")
@@ -44,6 +49,9 @@ func removeLive(t *testing.T, url string) {
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if tok := os.Getenv("BONYAN_HONCHO_TOKEN"); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
 		return http.DefaultClient.Do(req)
 	}
 	ids := func(path string) []string {
@@ -99,9 +107,63 @@ func TestLiveConformance(t *testing.T) {
 		n++
 		prefix := livePrefix + "-" + strconv.FormatInt(run, 36) + "-" + strconv.Itoa(n)
 		return func(namespace string) memory.Backend {
-			b, err := honcho.Open(honcho.Options{URL: url, Namespace: namespace, Prefix: prefix})
+			b, err := honcho.Open(honcho.Options{URL: url, Namespace: namespace, Prefix: prefix, Token: os.Getenv("BONYAN_HONCHO_TOKEN")})
 			require.NoError(t, err)
 			return b
 		}
 	})
+}
+
+// A token the service scopes to one workspace is enough for every operation
+// (ADR 0003 §5): run with BONYAN_HONCHO_WORKSPACE naming a workspace under the
+// live tests' prefix and BONYAN_HONCHO_SCOPED_TOKEN a token scoped to it.
+// Peers cannot be deleted, so the workspace is the live tests' own, never a
+// program's: the test refuses any other, and removing the workspace after it
+// takes BONYAN_HONCHO_TOKEN.
+func TestLiveScopedToken(t *testing.T) {
+	url := liveURL(t)
+	ws, token := os.Getenv("BONYAN_HONCHO_WORKSPACE"), os.Getenv("BONYAN_HONCHO_SCOPED_TOKEN")
+	if ws == "" || token == "" {
+		t.Skip("BONYAN_HONCHO_WORKSPACE and BONYAN_HONCHO_SCOPED_TOKEN are not set")
+	}
+	require.True(t, strings.HasPrefix(ws, livePrefix+"-"), "the workspace must be the live tests' own, under %s-", livePrefix)
+	b, err := honcho.Open(honcho.Options{URL: url, Namespace: "livetest", Workspace: ws, Token: token, DeleteWait: time.Minute})
+	require.NoError(t, err)
+
+	run := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ana, bo := "ana-"+run, "bo-"+run
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, subject := range []string{ana, bo} {
+		for _, r := range []memory.Record{
+			{Layer: memory.ShortTerm, Subject: subject, Session: "s1", Origin: content.KindUser, Text: subject + " old event", At: now.Add(-2 * time.Hour)},
+			{Layer: memory.ShortTerm, Subject: subject, Session: "s1", Origin: content.KindUser, Text: subject + " new event", At: now},
+			{Layer: memory.LongTerm, Subject: subject, Origin: content.KindUser, Text: subject + " rides trains", At: now},
+		} {
+			r.Decision = memory.Decision{Verdict: trust.Untrusted, Policy: "default"}
+			_, err := b.Write(ctx, r)
+			require.NoError(t, err, "write")
+		}
+	}
+	for _, subject := range []string{ana, bo} {
+		got, err := b.Recall(ctx, subject, "", 10, time.Time{})
+		require.NoError(t, err, "recall")
+		assert.Equal(t, []string{subject + " rides trains"}, texts(got), "recall keeps users apart")
+	}
+
+	require.NoError(t, b.DeleteBefore(ctx, now.Add(-time.Hour)), "retention, without listing workspaces")
+	h, err := b.History(ctx, ana, "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{ana + " new event"}, texts(h))
+
+	require.NoError(t, b.DeleteSubject(ctx, ana), "erase")
+	h, err = b.History(ctx, ana, "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, h)
+	got, err := b.Recall(ctx, ana, "", 10, time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	h, err = b.History(ctx, bo, "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{bo + " new event"}, texts(h), "the other user is untouched")
+	require.NoError(t, b.DeleteSubject(ctx, bo))
 }

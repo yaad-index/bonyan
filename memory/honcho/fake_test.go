@@ -32,19 +32,53 @@ type fake struct {
 	unembedded bool
 	// short answers a batch of messages with one fewer than it took.
 	short bool
+	// scope, when set, answers 401 to any call outside that one workspace,
+	// listing workspaces included, as a token scoped to it does.
+	scope string
+	// leaky ignores the filters of a conclusion list or query and lists every
+	// session of the workspace as any peer's, so a backend relying on the
+	// service alone to keep users apart shows it.
+	leaky bool
+	// queue is the deriver's work by status filter, "sender_id=<peer>" or
+	// "observer_id=<peer>". Each status read with work takes one unit off,
+	// and when the last unit goes, late runs, as a derivation finishing after
+	// an erase began. busyAs reports the work as under way rather than
+	// waiting.
+	queue  map[string]int
+	late   func(ws, peer string)
+	busyAs string
+	// filters records the filters of every conclusion list or query.
+	filters []map[string]any
+	// lag is how many requests a deleted session outlives: the service marks
+	// it inactive at once, lists it among a peer's sessions as inactive,
+	// refuses its name to a new session, and removes it later, from its
+	// queue. A negative lag never removes it.
+	lag   int
+	ticks int
+	// foreign, when set, is a session name listed among every peer's
+	// sessions as another workspace's, as a service scoping a lookup wrongly
+	// would.
+	foreign string
+	// calls records every request as "METHOD path".
+	calls []string
 }
 
 type fakeWorkspace struct {
 	config      map[string]any
+	metadata    map[string]any
 	peers       map[string]bool
+	peerMeta    map[string]map[string]any
+	cards       map[string][]any
 	sessions    map[string]*fakeSession
 	order       []string
 	conclusions []fakeConclusion
 }
 
 type fakeSession struct {
-	peers    map[string]any
-	messages []map[string]any
+	peers     map[string]any
+	messages  []map[string]any
+	deleted   bool
+	deletedAt int
 }
 
 type fakeConclusion struct {
@@ -56,7 +90,7 @@ const fakePage = 3
 
 func newFake(t *testing.T) (*fake, *httptest.Server) {
 	t.Helper()
-	f := &fake{ws: map[string]*fakeWorkspace{}, now: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
+	f := &fake{ws: map[string]*fakeWorkspace{}, queue: map[string]int{}, lag: 3, now: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -106,20 +140,36 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusInternalServerError, map[string]string{"detail": "SECRET-BODY failure"})
 		return
 	}
+	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
+	f.ticks++
+	f.reap()
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	p := strings.Split(strings.TrimPrefix(r.URL.Path, "/v3/workspaces"), "/")
 	// p[0] is empty; p[1] the workspace, or "list"; then the resource.
+	if f.scope != "" {
+		target := ""
+		if len(p) > 1 {
+			target = p[1]
+		} else if id, ok := body["id"].(string); ok {
+			target = id
+		}
+		if target != f.scope {
+			write(w, http.StatusUnauthorized, nil)
+			return
+		}
+	}
 	switch {
 	case len(p) == 1 && r.Method == http.MethodPost:
 		id := body["id"].(string)
-		if _, ok := f.ws[id]; ok {
-			write(w, http.StatusOK, map[string]any{"id": id})
+		if ws, ok := f.ws[id]; ok {
+			write(w, http.StatusOK, map[string]any{"id": id, "metadata": ws.metadata})
 			return
 		}
 		cfg, _ := body["configuration"].(map[string]any)
-		f.ws[id] = &fakeWorkspace{config: cfg, peers: map[string]bool{}, sessions: map[string]*fakeSession{}}
-		write(w, http.StatusCreated, map[string]any{"id": id})
+		meta, _ := body["metadata"].(map[string]any)
+		f.ws[id] = newFakeWorkspace(cfg, meta)
+		write(w, http.StatusOK, map[string]any{"id": id, "metadata": meta})
 		return
 	case len(p) == 2 && p[1] == "list":
 		ids := make([]map[string]any, 0, len(f.ws))
@@ -136,6 +186,58 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case len(p) == 2 && r.Method == http.MethodPut:
+		ws.metadata, _ = body["metadata"].(map[string]any)
+		ws.config, _ = body["configuration"].(map[string]any)
+		write(w, http.StatusOK, map[string]any{"id": p[1], "metadata": ws.metadata})
+	case len(p) == 4 && p[2] == "peers" && r.Method == http.MethodPut:
+		if !ws.peers[p[3]] {
+			write(w, http.StatusNotFound, nil)
+			return
+		}
+		ws.peerMeta[p[3]], _ = body["metadata"].(map[string]any)
+		write(w, http.StatusOK, map[string]any{"id": p[3]})
+	case len(p) == 5 && p[2] == "peers" && p[4] == "card":
+		if !ws.peers[p[3]] {
+			write(w, http.StatusNotFound, nil)
+			return
+		}
+		card, _ := body["peer_card"].([]any)
+		ws.cards[p[3]+"|"+r.URL.Query().Get("target")] = card
+		write(w, http.StatusOK, map[string]any{"peer_card": card})
+	case len(p) == 5 && p[2] == "peers" && p[4] == "sessions":
+		var out []map[string]any
+		for _, id := range ws.order {
+			s, ok := ws.sessions[id]
+			if !ok {
+				continue
+			}
+			if _, member := s.peers[p[3]]; member || f.leaky {
+				out = append(out, map[string]any{"id": id, "is_active": !s.deleted, "workspace_id": p[1]})
+			}
+		}
+		if f.foreign != "" {
+			out = append(out, map[string]any{"id": f.foreign, "is_active": true, "workspace_id": "another"})
+		}
+		paged(w, r, out)
+	case len(p) == 4 && p[2] == "queue" && p[3] == "status":
+		q := r.URL.Query()
+		filter, peer := "sender_id="+q.Get("sender_id"), q.Get("sender_id")
+		if peer == "" {
+			filter, peer = "observer_id="+q.Get("observer_id"), q.Get("observer_id")
+		}
+		n := f.queue[filter]
+		if n > 0 {
+			f.queue[filter] = n - 1
+			if n == 1 && f.late != nil {
+				f.late(p[1], peer)
+			}
+		}
+		status := map[string]any{"pending_work_units": n, "in_progress_work_units": 0}
+		if f.busyAs == "in_progress" {
+			status = map[string]any{"pending_work_units": 0, "in_progress_work_units": n}
+		}
+		write(w, http.StatusOK, status)
 	case len(p) == 2 && r.Method == http.MethodDelete:
 		if len(ws.sessions) > 0 || f.busy > 0 {
 			f.busy = max(f.busy-1, 0)
@@ -152,28 +254,39 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, code, map[string]any{"id": body["id"]})
 	case len(p) == 3 && p[2] == "sessions":
 		id := body["id"].(string)
-		if _, ok := ws.sessions[id]; ok {
+		if s, ok := ws.sessions[id]; ok {
+			if s.deleted {
+				write(w, http.StatusNotFound, nil)
+				return
+			}
 			write(w, http.StatusOK, map[string]any{"id": id})
 			return
 		}
 		peers, _ := body["peers"].(map[string]any)
+		for peer := range peers {
+			if !ws.peers[peer] {
+				write(w, http.StatusNotFound, map[string]string{"detail": "peer not found"})
+				return
+			}
+		}
 		ws.sessions[id] = &fakeSession{peers: peers}
 		ws.order = append(ws.order, id)
 		write(w, http.StatusCreated, map[string]any{"id": id})
 	case len(p) == 4 && p[2] == "sessions" && p[3] == "list":
 		var out []map[string]any
 		for _, id := range ws.order {
-			if _, ok := ws.sessions[id]; ok {
-				out = append(out, map[string]any{"id": id})
+			if s, ok := ws.sessions[id]; ok && !s.deleted {
+				out = append(out, map[string]any{"id": id, "is_active": true})
 			}
 		}
 		paged(w, r, out)
 	case len(p) == 4 && p[2] == "sessions" && r.Method == http.MethodDelete:
-		if _, ok := ws.sessions[p[3]]; !ok {
+		s, ok := ws.sessions[p[3]]
+		if !ok || s.deleted {
 			write(w, http.StatusNotFound, nil)
 			return
 		}
-		delete(ws.sessions, p[3])
+		s.deleted, s.deletedAt = true, f.ticks
 		write(w, http.StatusAccepted, nil)
 	case len(p) == 5 && p[2] == "sessions":
 		s, ok := ws.sessions[p[3]]
@@ -183,6 +296,10 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		switch p[4] {
 		case "messages":
+			if s.deleted {
+				write(w, http.StatusNotFound, nil)
+				return
+			}
 			batch := body["messages"].([]any)
 			if len(batch) > 100 {
 				write(w, http.StatusUnprocessableEntity, map[string]string{"detail": "too many messages"})
@@ -192,6 +309,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for _, m := range batch {
 				m := m.(map[string]any)
 				m["id"] = f.id()
+				m["workspace_id"], m["session_id"] = p[1], p[3]
 				if _, ok := m["metadata"]; !ok {
 					m["metadata"] = map[string]any{}
 				}
@@ -234,13 +352,14 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusCreated, out)
 	case len(p) == 4 && p[2] == "conclusions" && (p[3] == "list" || p[3] == "query"):
 		filters, _ := body["filters"].(map[string]any)
+		f.filters = append(f.filters, filters)
 		if p[3] == "query" && (filters["observer_id"] == nil || filters["observed_id"] == nil) {
 			write(w, http.StatusUnprocessableEntity, map[string]string{"detail": "observer and observed must be specified for semantic search"})
 			return
 		}
 		var out []map[string]any
 		for _, c := range ws.conclusions {
-			if (filters["observer_id"] == nil || filters["observer_id"] == c.Observer) && (filters["observed_id"] == nil || filters["observed_id"] == c.Observed) {
+			if f.leaky || (filters["observer_id"] == nil || filters["observer_id"] == c.Observer) && (filters["observed_id"] == nil || filters["observed_id"] == c.Observed) {
 				out = append(out, conclusionJSON(c))
 			}
 		}
@@ -267,8 +386,86 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func newFakeWorkspace(cfg, meta map[string]any) *fakeWorkspace {
+	return &fakeWorkspace{
+		config: cfg, metadata: meta, peers: map[string]bool{}, peerMeta: map[string]map[string]any{},
+		cards: map[string][]any{}, sessions: map[string]*fakeSession{},
+	}
+}
+
+// makeWorkspace adds a workspace with metadata, as an operator would.
+func (f *fake) makeWorkspace(id string, meta map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ws[id] = newFakeWorkspace(nil, meta)
+}
+
+// setCard sets a card in a workspace, as the service's deriver would.
+func (f *fake) setCard(ws, observer, target string, card ...any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ws[ws].cards[observer+"|"+target] = card
+}
+
+// setPeerMeta sets a peer's metadata, as anyone able to write to the service
+// could.
+func (f *fake) setPeerMeta(ws, peer string, meta map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ws[ws].peerMeta[peer] = meta
+}
+
+// conclusionsOf lists the contents of a workspace's conclusions that peer
+// holds or is the subject of.
+func (f *fake) conclusionsOf(ws, peer string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.ws[ws].conclusions {
+		if c.Observer == peer || c.Observed == peer {
+			out = append(out, c.Content)
+		}
+	}
+	return out
+}
+
+// called lists the requests the fake answered.
+func (f *fake) called() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
 func conclusionJSON(c fakeConclusion) map[string]any {
 	return map[string]any{"id": c.ID, "content": c.Content, "observer_id": c.Observer, "observed_id": c.Observed, "created_at": c.At.Format(time.RFC3339Nano)}
+}
+
+// reap removes the deleted sessions whose lag has run out, as the service's
+// queue does.
+func (f *fake) reap() {
+	if f.lag < 0 {
+		return
+	}
+	for _, ws := range f.ws {
+		for id, s := range ws.sessions {
+			if s.deleted && f.ticks-s.deletedAt > f.lag {
+				delete(ws.sessions, id)
+			}
+		}
+	}
+}
+
+// removed reports whether no session, deleted or not, is left in ws under
+// the given name prefix.
+func (f *fake) removed(ws, prefix string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id := range f.ws[ws].sessions {
+		if strings.HasPrefix(id, prefix) {
+			return false
+		}
+	}
+	return true
 }
 
 // workspaces lists the fake's workspaces.
@@ -283,13 +480,15 @@ func (f *fake) workspaces() []string {
 	return out
 }
 
-// sessions lists a workspace's sessions.
+// sessions lists a workspace's sessions not deleted.
 func (f *fake) sessions(ws string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []string
-	for id := range f.ws[ws].sessions {
-		out = append(out, id)
+	for id, s := range f.ws[ws].sessions {
+		if !s.deleted {
+			out = append(out, id)
+		}
 	}
 	slices.Sort(out)
 	return out

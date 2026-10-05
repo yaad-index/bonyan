@@ -113,15 +113,27 @@ func list[T any](ctx context.Context, c *client, op, path string, body any) ([]T
 }
 
 type workspace struct {
-	ID string `json:"id"`
+	ID       string         `json:"id"`
+	Metadata map[string]any `json:"metadata"`
 }
 
 type session struct {
-	ID string `json:"id"`
+	ID        string `json:"id"`
+	Workspace string `json:"workspace_id"`
+	// Active is false for a session the service has marked deleted and not
+	// yet removed: it removes a deleted session's messages later, from its
+	// queue, and lists a peer's sessions with such ones included.
+	Active *bool `json:"is_active"`
 }
+
+// active reports whether s is not deleted. A session the service reports no
+// state for is taken as active.
+func (s session) active() bool { return s.Active == nil || *s.Active }
 
 type message struct {
 	ID        string         `json:"id"`
+	Workspace string         `json:"workspace_id"`
+	Session   string         `json:"session_id"`
 	Content   string         `json:"content"`
 	PeerID    string         `json:"peer_id"`
 	Metadata  map[string]any `json:"metadata"`
@@ -131,6 +143,8 @@ type message struct {
 type conclusion struct {
 	ID        string    `json:"id"`
 	Content   string    `json:"content"`
+	Observer  string    `json:"observer_id"`
+	Observed  string    `json:"observed_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -156,17 +170,18 @@ func wsPath(ws string) string { return "/v3/workspaces/" + url.PathEscape(ws) }
 
 func sessionPath(ws, s string) string { return wsPath(ws) + "/sessions/" + url.PathEscape(s) }
 
-func (c *client) createWorkspace(ctx context.Context, id, namespace string, cfg configuration) error {
-	body := map[string]any{"id": id, "metadata": map[string]any{"bonyan_namespace": namespace}, "configuration": cfg}
-	return c.call(ctx, http.MethodPost, "create workspace", "/v3/workspaces", nil, body, nil)
+// createWorkspace gets the workspace named id, making it with namespace
+// recorded when it is missing; an existing one comes back as it is.
+func (c *client) createWorkspace(ctx context.Context, id, namespace string, cfg configuration) (workspace, error) {
+	body := map[string]any{"id": id, "metadata": map[string]any{nsKey: namespace}, "configuration": cfg}
+	var w workspace
+	err := c.call(ctx, http.MethodPost, "create workspace", "/v3/workspaces", nil, body, &w)
+	return w, err
 }
 
-func (c *client) listWorkspaces(ctx context.Context) ([]workspace, error) {
-	return list[workspace](ctx, c, "list workspaces", "/v3/workspaces/list", map[string]any{})
-}
-
-func (c *client) deleteWorkspace(ctx context.Context, id string) error {
-	return c.call(ctx, http.MethodDelete, "delete workspace", wsPath(id), nil, nil, nil)
+// updateWorkspace sets the workspace's metadata and configuration.
+func (c *client) updateWorkspace(ctx context.Context, id string, metadata map[string]any, cfg configuration) error {
+	return c.call(ctx, http.MethodPut, "update workspace", wsPath(id), nil, map[string]any{"metadata": metadata, "configuration": cfg}, nil)
 }
 
 func (c *client) createPeer(ctx context.Context, ws, id string) error {
@@ -174,17 +189,50 @@ func (c *client) createPeer(ctx context.Context, ws, id string) error {
 }
 
 // createSession creates a session the user's peer and the program's peer take
-// part in, with only the user observed.
-func (c *client) createSession(ctx context.Context, ws, id string) error {
+// part in, with only the user observed and neither observing the other.
+func (c *client) createSession(ctx context.Context, ws, id, peer string) error {
 	body := map[string]any{"id": id, "peers": map[string]any{
-		peerUser:  map[string]bool{"observe_me": true},
-		peerAgent: map[string]bool{"observe_me": false},
+		peer:      map[string]bool{"observe_me": true, "observe_others": false},
+		agentPeer: map[string]bool{"observe_me": false, "observe_others": false},
 	}}
 	return c.call(ctx, http.MethodPost, "create session", wsPath(ws)+"/sessions", nil, body, nil)
 }
 
 func (c *client) listSessions(ctx context.Context, ws string) ([]session, error) {
 	return list[session](ctx, c, "list sessions", wsPath(ws)+"/sessions/list", map[string]any{})
+}
+
+// peerSessions lists the sessions peer takes part in.
+func (c *client) peerSessions(ctx context.Context, ws, peer string) ([]session, error) {
+	return list[session](ctx, c, "list peer sessions", wsPath(ws)+"/peers/"+url.PathEscape(peer)+"/sessions", map[string]any{})
+}
+
+// setCard empties observer's card: its own, or, with a target, the one it
+// holds about target.
+func (c *client) setCard(ctx context.Context, ws, observer, target string) error {
+	var q url.Values
+	if target != "" {
+		q = url.Values{"target": {target}}
+	}
+	return c.call(ctx, http.MethodPut, "set peer card", wsPath(ws)+"/peers/"+url.PathEscape(observer)+"/card", q, map[string]any{"peer_card": []string{}}, nil)
+}
+
+// updatePeer empties peer's metadata.
+func (c *client) updatePeer(ctx context.Context, ws, peer string) error {
+	return c.call(ctx, http.MethodPut, "update peer", wsPath(ws)+"/peers/"+url.PathEscape(peer), nil, map[string]any{"metadata": map[string]any{}}, nil)
+}
+
+// queued is how much work the service's deriver holds, waiting or under way,
+// matching q.
+func (c *client) queued(ctx context.Context, ws string, q url.Values) (int, error) {
+	var st struct {
+		Pending    int `json:"pending_work_units"`
+		InProgress int `json:"in_progress_work_units"`
+	}
+	if err := c.call(ctx, http.MethodGet, "queue status", wsPath(ws)+"/queue/status", q, nil, &st); err != nil {
+		return 0, err
+	}
+	return st.Pending + st.InProgress, nil
 }
 
 func (c *client) deleteSession(ctx context.Context, ws, id string) error {
@@ -209,18 +257,27 @@ func (c *client) searchMessages(ctx context.Context, ws, s, query string) ([]mes
 	return out, err
 }
 
-// selfFilter selects the conclusions the user's peer holds about itself.
-var selfFilter = map[string]any{"observer_id": peerUser, "observed_id": peerUser}
-
-func (c *client) listConclusions(ctx context.Context, ws string) ([]conclusion, error) {
-	return list[conclusion](ctx, c, "list conclusions", wsPath(ws)+"/conclusions/list", map[string]any{"filters": selfFilter})
+// selfFilter selects the conclusions peer holds about itself.
+func selfFilter(peer string) map[string]any {
+	return map[string]any{"observer_id": peer, "observed_id": peer}
 }
 
-// queryConclusions returns the user's conclusions best matching query, as
-// many as the service serves at once, for the caller to filter and cut.
-func (c *client) queryConclusions(ctx context.Context, ws, query string) ([]conclusion, error) {
+// listConclusions lists the workspace's conclusions matching filters; nil
+// filters list them all.
+func (c *client) listConclusions(ctx context.Context, ws string, filters map[string]any) ([]conclusion, error) {
+	body := map[string]any{}
+	if filters != nil {
+		body["filters"] = filters
+	}
+	return list[conclusion](ctx, c, "list conclusions", wsPath(ws)+"/conclusions/list", body)
+}
+
+// queryConclusions returns the conclusions matching filters that best match
+// query, as many as the service serves at once, for the caller to filter and
+// cut.
+func (c *client) queryConclusions(ctx context.Context, ws, query string, filters map[string]any) ([]conclusion, error) {
 	var out []conclusion
-	err := c.call(ctx, http.MethodPost, "query conclusions", wsPath(ws)+"/conclusions/query", nil, map[string]any{"query": query, "top_k": pageSize, "filters": selfFilter}, &out)
+	err := c.call(ctx, http.MethodPost, "query conclusions", wsPath(ws)+"/conclusions/query", nil, map[string]any{"query": query, "top_k": pageSize, "filters": filters}, &out)
 	return out, err
 }
 
