@@ -72,6 +72,9 @@ func texts(recs []memory.Record) []string {
 	return out
 }
 
+// ana is the peer of the subject most tests write: the hex of "ana".
+var ana = hex.EncodeToString([]byte("ana"))
+
 // onlyWorkspace is the one workspace the fake holds.
 func onlyWorkspace(t *testing.T, f *fake) string {
 	t.Helper()
@@ -82,15 +85,17 @@ func onlyWorkspace(t *testing.T, f *fake) string {
 
 // What the deriver concluded about the user comes back as derived facts:
 // untrusted, from the user's messages, with the conclusion's time. What it
-// concluded about the program's peer does not.
+// concluded about the program's peer, or another peer about the user, does
+// not.
 func TestConclusionsAboutTheUserComeBackAsDerivedFacts(t *testing.T) {
 	f, srv := newFake(t)
 	b := open(t, f, srv.URL)
 	_, err := b.Write(ctx, event("s1", "I take the train", start))
 	require.NoError(t, err)
 	ws := onlyWorkspace(t, f)
-	f.conclude(ws, "user", "user", "commutes by train", start.Add(time.Minute))
+	f.conclude(ws, ana, ana, "commutes by train", start.Add(time.Minute))
 	f.conclude(ws, "agent", "agent", "about the program", start.Add(time.Minute))
+	f.conclude(ws, "626f", ana, "another peer's view of ana", start.Add(time.Minute))
 
 	for _, q := range []string{"", "train"} {
 		got, err := b.Recall(ctx, "ana", q, 10, time.Time{})
@@ -106,21 +111,66 @@ func TestConclusionsAboutTheUserComeBackAsDerivedFacts(t *testing.T) {
 	}
 }
 
-// Deleting a subject deletes its workspace, waiting while the service still
-// holds its sessions.
-func TestDeletingASubjectDeletesItsWorkspace(t *testing.T) {
+// Deleting a subject erases it from the workspace: its sessions, the
+// conclusions it holds or is the subject of, its card and the program's card
+// about it, and its metadata. Another subject in the same workspace keeps all
+// of its own, and the erased subject's empty peer remains (ADR 0003 §3).
+func TestErasingASubjectRemovesEverythingButThePeer(t *testing.T) {
 	f, srv := newFake(t)
 	b := open(t, f, srv.URL)
-	_, err := b.Write(ctx, event("s1", "hello", start))
-	require.NoError(t, err)
-	f.busy = 3
-	require.NoError(t, b.DeleteSubject(ctx, "ana"))
-	assert.Empty(t, f.workspaces())
-	require.NoError(t, b.DeleteSubject(ctx, "ana"), "gone already")
+	bo := hex.EncodeToString([]byte("bo"))
+	for _, subject := range []string{"ana", "bo"} {
+		r := event("s1", subject+"'s event", start)
+		r.Subject = subject
+		_, err := b.Write(ctx, r)
+		require.NoError(t, err)
+		_, err = b.Write(ctx, memory.Record{Layer: memory.LongTerm, Subject: subject, Origin: content.KindUser, Text: subject + "'s fact", At: start})
+		require.NoError(t, err)
+	}
+	ws := onlyWorkspace(t, f)
+	for _, peer := range []string{ana, bo} {
+		f.conclude(ws, peer, peer, peer+" about itself", start)
+		f.conclude(ws, "agent", peer, "the program about "+peer, start)
+		f.setCard(ws, peer, "", "a card")
+		f.setCard(ws, "agent", peer, "the program's card")
+		f.setPeerMeta(ws, peer, map[string]any{"name": "someone"})
+	}
+	f.conclude(ws, ana, bo, "ana about bo", start)
 
-	_, err = b.Write(ctx, event("s1", "back again", start))
-	require.NoError(t, err, "writing after a delete makes the workspace again")
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+
+	for _, s := range f.sessions(ws) {
+		assert.False(t, strings.HasPrefix(s, ana+"--"), "ana's session %s is gone", s)
+	}
+	assert.Empty(t, f.conclusionsOf(ws, ana), "no conclusion ana holds or is the subject of")
+	assert.Empty(t, f.ws[ws].cards[ana+"|"])
+	assert.Empty(t, f.ws[ws].cards["agent|"+ana])
+	assert.Empty(t, f.ws[ws].peerMeta[ana])
+	assert.True(t, f.ws[ws].peers[ana], "the peer remains: the service cannot delete one")
+	assert.Equal(t, []string{ws}, f.workspaces(), "the workspace stays")
+
 	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, h)
+	got, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	h, err = b.History(ctx, "bo", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bo's event"}, texts(h), "bo's records stay")
+	got, err = b.Recall(ctx, "bo", "", 10, time.Time{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"bo's fact", bo + " about itself"}, texts(got))
+	assert.ElementsMatch(t, []string{bo + " about itself", "the program about " + bo}, f.conclusionsOf(ws, bo), "bo's conclusions stay, ana's about bo go")
+	assert.Equal(t, []any{"a card"}, f.ws[ws].cards[bo+"|"])
+	assert.Equal(t, []any{"the program's card"}, f.ws[ws].cards["agent|"+bo])
+	assert.NotEmpty(t, f.ws[ws].peerMeta[bo])
+
+	require.NoError(t, b.DeleteSubject(ctx, "ana"), "erasing again is fine")
+	_, err = b.Write(ctx, event("s1", "back again", start))
+	require.NoError(t, err, "the empty peer is written to again")
+	h, err = b.History(ctx, "ana", "s1", time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"back again"}, texts(h))
 }
@@ -136,8 +186,8 @@ func TestAPurgeRewritesASessionAcrossTheCut(t *testing.T) {
 	}
 	before, err := b.History(ctx, "ana", "s1", time.Time{})
 	require.NoError(t, err)
-	f.conclude(onlyWorkspace(t, f), "user", "user", "an old conclusion", start)
-	f.conclude(onlyWorkspace(t, f), "user", "user", "a new conclusion", start.Add(3*time.Hour))
+	f.conclude(onlyWorkspace(t, f), ana, ana, "an old conclusion", start)
+	f.conclude(onlyWorkspace(t, f), ana, ana, "a new conclusion", start.Add(3*time.Hour))
 
 	require.NoError(t, b.DeleteBefore(ctx, start.Add(2*time.Hour)))
 	after, err := b.History(ctx, "ana", "s1", time.Time{})
@@ -245,18 +295,21 @@ func TestMessagesGoToTheirPeerWithTheDeriverSetForThem(t *testing.T) {
 	ws := onlyWorkspace(t, f)
 	assert.Equal(t, map[string]any{"enabled": true, "custom_instructions": "about the speaker only"}, f.ws[ws].config["reasoning"])
 	for _, s := range f.ws[ws].sessions {
-		assert.Equal(t, map[string]any{"user": map[string]any{"observe_me": true}, "agent": map[string]any{"observe_me": false}}, s.peers, "only the user is observed")
+		assert.Equal(t, map[string]any{
+			ana:     map[string]any{"observe_me": true, "observe_others": false},
+			"agent": map[string]any{"observe_me": false, "observe_others": false},
+		}, s.peers, "only the user is observed, and nobody observes another")
 	}
 	var events, facts []map[string]any
 	for _, s := range f.sessions(ws) {
-		if strings.HasPrefix(s, "facts-") {
+		if strings.HasPrefix(s, ana+"--facts-") {
 			facts = append(facts, f.messages(ws, s)...)
 		} else {
 			events = append(events, f.messages(ws, s)...)
 		}
 	}
 	require.Len(t, events, 2)
-	assert.Equal(t, "user", events[0]["peer_id"])
+	assert.Equal(t, ana, events[0]["peer_id"])
 	assert.Equal(t, "agent", events[1]["peer_id"])
 	assert.Nil(t, events[0]["configuration"], "the workspace's deriver reads an event")
 	require.Len(t, facts, 1)
@@ -276,15 +329,40 @@ func TestTheFactory(t *testing.T) {
 	require.Error(t, err, "no URL")
 }
 
-// A namespace and subject too long for a workspace name are refused, not cut.
+// A subject too long for a peer name, or a subject and session too long for a
+// session name at any generation, is refused before any call, not cut; the
+// error gives lengths, never the names. So is a namespace too long for the
+// workspace's name.
 func TestATooLongNameIsRefused(t *testing.T) {
 	f, srv := newFake(t)
 	b := open(t, f, srv.URL)
+
 	r := event("s1", "hello", start)
 	r.Subject = strings.Repeat("x", 300)
 	_, err := b.Write(ctx, r)
-	require.ErrorContains(t, err, "too long")
-	assert.Empty(t, f.workspaces())
+	require.ErrorContains(t, err, "too long for a peer name (600 characters, at most 512)")
+	assert.NotContains(t, err.Error(), "xxx")
+	for _, call := range []func() error{
+		func() error { _, err := b.History(ctx, r.Subject, "s1", time.Time{}); return err },
+		func() error { _, err := b.Recall(ctx, r.Subject, "", 1, time.Time{}); return err },
+		func() error { return b.DeleteSubject(ctx, r.Subject) },
+	} {
+		require.ErrorContains(t, call(), "too long")
+	}
+
+	r = event(strings.Repeat("s", 50), "hello", start)
+	r.Subject = strings.Repeat("x", 200)
+	_, err = b.Write(ctx, r)
+	require.ErrorContains(t, err, "too long for a session name (513 characters, at most 512)")
+	r.Session = strings.Repeat("s", 49)
+	_, err = b.Write(ctx, r)
+	require.NoError(t, err, "one shorter fits, with room for any generation")
+
+	f2, srv2 := newFake(t)
+	_, err = honcho.Open(honcho.Options{URL: srv2.URL, Namespace: strings.Repeat("n", 300)})
+	require.ErrorContains(t, err, "too long for a workspace name")
+	assert.Empty(t, f2.called())
+	assert.NotContains(t, strings.Join(f.called(), " "), hex.EncodeToString([]byte(strings.Repeat("x", 300))), "the refused subject was never sent")
 }
 
 // A session's events come back oldest first by their time, whatever the order
@@ -323,17 +401,16 @@ func TestAPurgeFinishesAHalfDoneRewrite(t *testing.T) {
 	assert.Equal(t, []string{"old", "new"}, texts(h), "nothing older than this cut, so nothing removed")
 }
 
-// Deleting a subject waits only while the service holds its sessions: any
-// other failure is returned at once.
+// Deleting a subject waits only while the deriver has work for it: any other
+// failure is returned at once.
 func TestDeletingASubjectFailsFastOnAnotherError(t *testing.T) {
 	f, srv := newFake(t)
 	b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", DeleteWait: 5 * time.Second})
 	require.NoError(t, err)
 	_, err = b.Write(ctx, event("s1", "hello", start))
 	require.NoError(t, err)
-	f.fail = func(method, path string) bool {
-		return method == http.MethodDelete && !strings.Contains(path, "/sessions/")
-	}
+	f.queue["sender_id="+ana] = 1000
+	f.fail = func(method, path string) bool { return strings.HasSuffix(path, "/queue/status") }
 	began := time.Now()
 	require.Error(t, b.DeleteSubject(ctx, "ana"))
 	assert.Less(t, time.Since(began), time.Second)
@@ -405,7 +482,7 @@ func TestOneSessionFailingDoesNotStopTheOthers(t *testing.T) {
 	require.NoError(t, err)
 	s1 := hex.EncodeToString([]byte("s1"))
 	f.fail = func(method, path string) bool {
-		return method == http.MethodPost && strings.Contains(path, "/sessions/"+s1+"-g2")
+		return method == http.MethodPost && strings.Contains(path, "--"+s1+"-g2")
 	}
 	require.Error(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
 	f.fail = nil
@@ -421,7 +498,7 @@ func TestAQueryRecallsConclusionsWithNoSessionLeft(t *testing.T) {
 	_, err := b.Write(ctx, event("s1", "old", start))
 	require.NoError(t, err)
 	ws := onlyWorkspace(t, f)
-	f.conclude(ws, "user", "user", "commutes by train", start.Add(2*time.Hour))
+	f.conclude(ws, ana, ana, "commutes by train", start.Add(2*time.Hour))
 	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
 	require.Empty(t, f.sessions(ws))
 	got, err := b.Recall(ctx, "ana", "train", 10, time.Time{})
@@ -437,23 +514,25 @@ func TestConclusionsAreNotCrowdedOut(t *testing.T) {
 		_, err := b.Write(ctx, memory.Record{Layer: memory.LongTerm, Subject: "ana", Origin: content.KindUser, Text: text, At: start})
 		require.NoError(t, err)
 	}
-	f.conclude(onlyWorkspace(t, f), "user", "user", "commutes by trains", start)
+	f.conclude(onlyWorkspace(t, f), ana, ana, "commutes by trains", start)
 	got, err := b.Recall(ctx, "ana", "trains", 2, time.Time{})
 	require.NoError(t, err)
 	assert.Contains(t, texts(got), "commutes by trains")
 }
 
-// After another process deleted the subject, a write here makes the workspace
-// again rather than failing.
-func TestAWriteAfterAnotherProcessDeletedTheSubject(t *testing.T) {
+// After another process deleted the workspace, a write here makes it again
+// rather than failing.
+func TestAWriteAfterAnotherProcessDeletedTheWorkspace(t *testing.T) {
 	f, srv := newFake(t)
-	here, there := open(t, f, srv.URL), open(t, f, srv.URL)
-	_, err := here.Write(ctx, event("s1", "first", start))
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "first", start))
 	require.NoError(t, err)
-	require.NoError(t, there.DeleteSubject(ctx, "ana"))
-	_, err = here.Write(ctx, event("s1", "second", start))
+	f.mu.Lock()
+	clear(f.ws)
+	f.mu.Unlock()
+	_, err = b.Write(ctx, event("s1", "second", start))
 	require.NoError(t, err)
-	h, err := here.History(ctx, "ana", "s1", time.Time{})
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"second"}, texts(h))
 }
@@ -491,4 +570,266 @@ func TestAnErrorDoesNotNameTheWorkspace(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), hex.EncodeToString([]byte("ana")))
 	assert.NotContains(t, err.Error(), "/v3/workspaces/")
+}
+
+// Every subject of a namespace is kept in one workspace, named by the prefix
+// and the namespace, which records the namespace it holds.
+func TestOneWorkspaceHoldsTheNamespace(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	for _, subject := range []string{"ana", "bo", "cy"} {
+		r := event("s1", "hello", start)
+		r.Subject = subject
+		_, err := b.Write(ctx, r)
+		require.NoError(t, err)
+	}
+	ws := "bonyan--" + hex.EncodeToString([]byte("test"))
+	assert.Equal(t, []string{ws}, f.workspaces())
+	assert.Equal(t, "test", f.ws[ws].metadata["bonyan_namespace"])
+	assert.Len(t, f.ws[ws].peers, 4, "one peer per subject, and the program's")
+}
+
+// A workspace recording another namespace is refused for every operation, and
+// nothing is written to it.
+func TestAWorkspaceOfAnotherNamespaceIsRefused(t *testing.T) {
+	f, srv := newFake(t)
+	f.makeWorkspace("shared", map[string]any{"bonyan_namespace": "other"})
+	b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Workspace: "shared"})
+	require.NoError(t, err)
+	for name, call := range map[string]func() error{
+		"write":     func() error { _, err := b.Write(ctx, event("s1", "hello", start)); return err },
+		"history":   func() error { _, err := b.History(ctx, "ana", "s1", time.Time{}); return err },
+		"recall":    func() error { _, err := b.Recall(ctx, "ana", "q", 1, time.Time{}); return err },
+		"delete":    func() error { return b.DeleteSubject(ctx, "ana") },
+		"retention": func() error { return b.DeleteBefore(ctx, start) },
+	} {
+		require.ErrorContains(t, call(), "another namespace", name)
+	}
+	assert.Empty(t, f.ws["shared"].peers)
+	assert.Empty(t, f.ws["shared"].sessions)
+	assert.Equal(t, "other", f.ws["shared"].metadata["bonyan_namespace"])
+}
+
+// A named workspace an operator made, recording no namespace, is taken for
+// the Backend's: the namespace is added to its metadata, which keeps what it
+// held, and the deriver is set as configured.
+func TestAnOperatorsWorkspaceIsTakenForTheNamespace(t *testing.T) {
+	f, srv := newFake(t)
+	f.makeWorkspace("ops-made", map[string]any{"owner": "ops"})
+	b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Workspace: "ops-made", Derive: true})
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"owner": "ops", "bonyan_namespace": "test"}, f.ws["ops-made"].metadata)
+	assert.Equal(t, map[string]any{"enabled": true}, f.ws["ops-made"].config["reasoning"])
+	assert.Equal(t, []string{"ops-made"}, f.workspaces())
+
+	other, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "other", Workspace: "ops-made"})
+	require.NoError(t, err)
+	_, err = other.Write(ctx, event("s1", "hello", start))
+	require.ErrorContains(t, err, "another namespace", "taken now")
+}
+
+// A prefix and a workspace name are not both given, and a workspace name
+// the service would refuse is refused at once.
+func TestAWorkspaceNameIsChecked(t *testing.T) {
+	_, srv := newFake(t)
+	_, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Prefix: "p", Workspace: "w"})
+	require.Error(t, err)
+	_, err = honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Workspace: "a/b"})
+	require.Error(t, err)
+	_, err = honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Workspace: strings.Repeat("w", 513)})
+	require.Error(t, err)
+	b, err := honcho.Factory("test", json.RawMessage(`{"url":"`+srv.URL+`","workspace":"w"}`))
+	require.NoError(t, err)
+	assert.Equal(t, "test", b.Namespace())
+}
+
+// Recall and history keep users apart even when the service does not: with
+// every filter ignored and every session listed as anyone's, a user still
+// reads only messages from their own sessions, sent by them or the program,
+// and conclusions their peer holds about itself.
+func TestReadsCheckEveryResultAgain(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	bo := hex.EncodeToString([]byte("bo"))
+	for _, subject := range []string{"ana", "bo"} {
+		r := event("s1", subject+" rides trains", start)
+		r.Subject = subject
+		_, err := b.Write(ctx, r)
+		require.NoError(t, err)
+		_, err = b.Write(ctx, memory.Record{Layer: memory.LongTerm, Subject: subject, Origin: content.KindUser, Text: subject + " likes trains", At: start})
+		require.NoError(t, err)
+	}
+	ws := onlyWorkspace(t, f)
+	f.conclude(ws, ana, ana, "ana concluded trains", start)
+	f.conclude(ws, bo, bo, "bo concluded trains", start)
+	f.conclude(ws, bo, ana, "bo about ana trains", start)
+	f.conclude(ws, ana, bo, "ana about bo trains", start)
+	var anaEvents string
+	for _, s := range f.sessions(ws) {
+		if strings.HasPrefix(s, ana+"--") && !strings.Contains(s, "--facts-") {
+			anaEvents = s
+		}
+	}
+	f.plant(ws, anaEvents, map[string]any{
+		"content": "planted by bo trains", "peer_id": bo, "created_at": start.Format(time.RFC3339),
+		"metadata": map[string]any{"bonyan": map[string]any{"layer": "short-term", "session": "s1", "origin": "user", "verdict": 2}},
+	})
+	_, err := b.Recall(ctx, "ana", "", 10, time.Time{})
+	require.NoError(t, err)
+	_, err = b.Recall(ctx, "ana", "trains", 10, time.Time{})
+	require.NoError(t, err)
+	for _, filters := range f.filters {
+		assert.Equal(t, map[string]any{"observer_id": ana, "observed_id": ana}, filters, "the service is asked for the user's own conclusions only")
+	}
+	f.leaky = true
+
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ana rides trains"}, texts(h))
+	for _, q := range []string{"", "trains"} {
+		got, err := b.Recall(ctx, "ana", q, 10, time.Time{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"ana likes trains", "ana concluded trains"}, texts(got), "query %q", q)
+	}
+}
+
+// An erase waits for the deriver to finish the user's work and deletes the
+// conclusions again, so a fact derived while it ran does not remain.
+func TestAnEraseDeletesWhatTheDeriverFormedWhileItRan(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "I take the train", start))
+	require.NoError(t, err)
+	ws := onlyWorkspace(t, f)
+	f.late = func(w, peer string) {
+		f.ws[w].conclusions = append(f.ws[w].conclusions, fakeConclusion{ID: "late", Content: "formed late", Observer: peer, Observed: peer, At: start})
+	}
+	for _, c := range []struct{ filter, busyAs string }{
+		{"sender_id=" + ana, "pending"},
+		{"observer_id=" + ana, "pending"},
+		{"sender_id=" + ana, "in_progress"},
+	} {
+		f.mu.Lock()
+		f.queue[c.filter], f.busyAs = 3, c.busyAs
+		f.mu.Unlock()
+		require.NoError(t, b.DeleteSubject(ctx, "ana"))
+		f.mu.Lock()
+		left := f.queue[c.filter]
+		f.mu.Unlock()
+		assert.Zero(t, left, "%s %s: the queue was read until it drained", c.filter, c.busyAs)
+		assert.Empty(t, f.conclusionsOf(ws, ana), "%s %s", c.filter, c.busyAs)
+	}
+}
+
+// An erase the deriver keeps busy past the wait fails and says so; deleting
+// again once the deriver is done finishes it.
+func TestAnEraseFailsWhileTheDeriverHoldsWork(t *testing.T) {
+	f, srv := newFake(t)
+	b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", DeleteWait: 200 * time.Millisecond})
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	f.queue["observer_id="+ana] = 1 << 30
+	require.ErrorContains(t, b.DeleteSubject(ctx, "ana"), "deriver still had work")
+	f.mu.Lock()
+	f.queue["observer_id="+ana] = 0
+	f.mu.Unlock()
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+}
+
+// A token scoped to the namespace's workspace is enough for every operation:
+// no call names another workspace or lists them.
+func TestATokenScopedToTheWorkspaceIsEnough(t *testing.T) {
+	f, srv := newFake(t)
+	f.scope = "bonyan--" + hex.EncodeToString([]byte("test"))
+	b := open(t, f, srv.URL)
+	_, err := b.Write(ctx, event("s1", "old", start))
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s1", "new", start.Add(2*time.Hour)))
+	require.NoError(t, err)
+	_, err = b.Recall(ctx, "ana", "q", 10, time.Time{})
+	require.NoError(t, err)
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	h, err := b.History(ctx, "ana", "s1", time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new"}, texts(h))
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+	for _, c := range f.called() {
+		assert.NotContains(t, c, "/v3/workspaces/list")
+	}
+}
+
+// The conformance suite passes with listing workspaces refused, as a scoped
+// token refuses it.
+func TestConformanceWithoutListingWorkspaces(t *testing.T) {
+	memorytest.Run(t, func(t *testing.T) memorytest.Open {
+		f, srv := newFake(t)
+		f.fail = func(_, path string) bool { return path == "/v3/workspaces/list" }
+		return func(namespace string) memory.Backend {
+			b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: namespace, DeleteWait: time.Second})
+			require.NoError(t, err)
+			return b
+		}
+	})
+}
+
+// With the service listing every session as anyone's, a user's write still
+// goes to the user's own first generation, whatever generations another user
+// has reached.
+func TestAWriteCountsOnlyTheUsersOwnGenerations(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	for i, text := range []string{"old", "new"} {
+		r := event("s1", text, start.Add(time.Duration(i)*2*time.Hour))
+		r.Subject = "bo"
+		_, err := b.Write(ctx, r)
+		require.NoError(t, err)
+	}
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)), "bo's s1 is at its second generation")
+	f.leaky = true
+	_, err := b.Write(ctx, event("s1", "ana's first", start))
+	require.NoError(t, err)
+	s1 := hex.EncodeToString([]byte("s1"))
+	assert.Contains(t, f.sessions(onlyWorkspace(t, f)), ana+"--"+s1+"-g1")
+}
+
+// An erase deletes only the user's conclusions even when the service ignores
+// the filter it is given.
+func TestAnEraseDeletesOnlyTheUsersConclusions(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	bo := hex.EncodeToString([]byte("bo"))
+	_, err := b.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	ws := onlyWorkspace(t, f)
+	f.conclude(ws, ana, ana, "about ana", start)
+	f.conclude(ws, bo, bo, "about bo", start)
+	f.leaky = true
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+	assert.Empty(t, f.conclusionsOf(ws, ana))
+	assert.Equal(t, []string{"about bo"}, f.conclusionsOf(ws, bo))
+}
+
+// A rewrite copies only the user's own conversation: a message another peer
+// put in the user's session is not carried into the new generation.
+func TestARewriteCopiesOnlyTheUsersMessages(t *testing.T) {
+	f, srv := newFake(t)
+	b := open(t, f, srv.URL)
+	for i, text := range []string{"old", "new"} {
+		_, err := b.Write(ctx, event("s1", text, start.Add(time.Duration(i)*2*time.Hour)))
+		require.NoError(t, err)
+	}
+	ws := onlyWorkspace(t, f)
+	f.plant(ws, f.sessions(ws)[0], map[string]any{
+		"content": "planted", "peer_id": hex.EncodeToString([]byte("bo")), "created_at": start.Add(3 * time.Hour).Format(time.RFC3339),
+		"metadata": map[string]any{"bonyan": map[string]any{"layer": "short-term", "session": "s1", "origin": "user", "verdict": 2}},
+	})
+	require.NoError(t, b.DeleteBefore(ctx, start.Add(time.Hour)))
+	gens := f.sessions(ws)
+	require.Len(t, gens, 1)
+	for _, m := range f.messages(ws, gens[0]) {
+		assert.NotEqual(t, "planted", m["content"])
+	}
 }
