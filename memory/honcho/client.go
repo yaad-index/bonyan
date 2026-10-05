@@ -113,8 +113,9 @@ func list[T any](ctx context.Context, c *client, op, path string, body any) ([]T
 }
 
 type workspace struct {
-	ID       string         `json:"id"`
-	Metadata map[string]any `json:"metadata"`
+	ID            string         `json:"id"`
+	Metadata      map[string]any `json:"metadata"`
+	Configuration map[string]any `json:"configuration"`
 }
 
 type session struct {
@@ -156,6 +157,17 @@ type reasoning struct {
 
 type configuration struct {
 	Reasoning reasoning `json:"reasoning"`
+}
+
+// matches reports whether a workspace's stored configuration holds c's
+// deriver setting: the same switch and the same instructions, none counting as
+// empty. A switch the workspace does not set is not c's, whatever the
+// service's default.
+func (c configuration) matches(stored map[string]any) bool {
+	r, _ := stored["reasoning"].(map[string]any)
+	enabled, set := r["enabled"].(bool)
+	instructions, _ := r["custom_instructions"].(string)
+	return set && enabled == c.Reasoning.Enabled && instructions == c.Reasoning.CustomInstructions
 }
 
 type newMessage struct {
