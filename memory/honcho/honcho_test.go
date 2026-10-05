@@ -942,3 +942,59 @@ func TestAnEraseDoesNotWaitForAnotherWorkspacesSession(t *testing.T) {
 	f.foreign = ana + "--" + hex.EncodeToString([]byte("s1")) + "-g9"
 	require.NoError(t, b.DeleteSubject(ctx, "ana"))
 }
+
+// A workspace that exists keeps the deriver setting it was made with unless
+// it is written again: opening it with another setting, the deriver turned on
+// or off or its instructions changed, updates it, and opening it with the
+// same setting writes nothing.
+func TestAWorkspacesDeriverSettingFollowsTheBackend(t *testing.T) {
+	f, srv := newFake(t)
+	ws := "bonyan--" + hex.EncodeToString([]byte("test"))
+	reopen := func(derive bool, instructions string) {
+		t.Helper()
+		b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Derive: derive, Instructions: instructions})
+		require.NoError(t, err)
+		_, err = b.Write(ctx, event("s1", "hello", start))
+		require.NoError(t, err)
+	}
+	puts := func() int {
+		n := 0
+		for _, c := range f.called() {
+			if c == "PUT /v3/workspaces/"+ws {
+				n++
+			}
+		}
+		return n
+	}
+
+	reopen(false, "")
+	assert.Equal(t, map[string]any{"enabled": false}, f.ws[ws].config["reasoning"])
+	assert.Zero(t, puts(), "made with the setting, nothing to write")
+
+	reopen(true, "about the speaker")
+	assert.Equal(t, map[string]any{"enabled": true, "custom_instructions": "about the speaker"}, f.ws[ws].config["reasoning"], "turned on")
+	assert.Equal(t, 1, puts())
+	assert.Equal(t, "test", f.ws[ws].metadata["bonyan_namespace"], "the namespace stays recorded")
+
+	reopen(true, "about the speaker")
+	assert.Equal(t, 1, puts(), "the same setting writes nothing")
+
+	reopen(true, "")
+	assert.Equal(t, map[string]any{"enabled": true}, f.ws[ws].config["reasoning"], "instructions removed")
+
+	reopen(false, "")
+	assert.Equal(t, map[string]any{"enabled": false}, f.ws[ws].config["reasoning"], "turned off")
+	assert.Equal(t, 3, puts())
+}
+
+// A workspace an operator made with no deriver setting is given the Backend's,
+// rather than left to the service's default.
+func TestAWorkspaceWithNoDeriverSettingIsGivenOne(t *testing.T) {
+	f, srv := newFake(t)
+	f.makeWorkspace("ops-made", map[string]any{"bonyan_namespace": "test"})
+	b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", Workspace: "ops-made"})
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"enabled": false}, f.ws["ops-made"].config["reasoning"])
+}

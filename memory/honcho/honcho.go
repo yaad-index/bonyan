@@ -255,7 +255,10 @@ var errForeign = errors.New("honcho: the workspace holds another namespace")
 
 // workspace makes the workspace when it is missing and checks the namespace it
 // records, once per Backend: a workspace with none recorded is taken for this
-// namespace, one recording another is refused.
+// namespace, one recording another is refused. A workspace that already exists
+// keeps the deriver setting it was made with unless it is written again, so
+// one whose setting differs from the Backend's is updated to it: turning the
+// deriver off, or changing its instructions, takes effect at the next open.
 func (b *Backend) workspace(ctx context.Context) error {
 	b.mu.Lock()
 	ready := b.wsReady
@@ -279,6 +282,10 @@ func (b *Backend) workspace(ctx context.Context) error {
 		}
 	case ns != b.ns:
 		return errForeign
+	case !b.cfg.matches(w.Configuration):
+		if err := b.c.updateWorkspace(ctx, b.ws, w.Metadata, b.cfg); err != nil {
+			return err
+		}
 	}
 	b.mu.Lock()
 	b.wsReady = true

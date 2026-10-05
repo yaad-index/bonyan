@@ -2,6 +2,7 @@ package honcho_test
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -163,13 +164,13 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(p) == 1 && r.Method == http.MethodPost:
 		id := body["id"].(string)
 		if ws, ok := f.ws[id]; ok {
-			write(w, http.StatusOK, map[string]any{"id": id, "metadata": ws.metadata})
+			write(w, http.StatusOK, map[string]any{"id": id, "metadata": ws.metadata, "configuration": ws.config})
 			return
 		}
 		cfg, _ := body["configuration"].(map[string]any)
 		meta, _ := body["metadata"].(map[string]any)
 		f.ws[id] = newFakeWorkspace(cfg, meta)
-		write(w, http.StatusOK, map[string]any{"id": id, "metadata": meta})
+		write(w, http.StatusOK, map[string]any{"id": id, "metadata": meta, "configuration": cfg})
 		return
 	case len(p) == 2 && p[1] == "list":
 		ids := make([]map[string]any, 0, len(f.ws))
@@ -188,7 +189,13 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(p) == 2 && r.Method == http.MethodPut:
 		ws.metadata, _ = body["metadata"].(map[string]any)
-		ws.config, _ = body["configuration"].(map[string]any)
+		// The service merges a configuration's keys into the stored ones.
+		if cfg, ok := body["configuration"].(map[string]any); ok {
+			if ws.config == nil {
+				ws.config = map[string]any{}
+			}
+			maps.Copy(ws.config, cfg)
+		}
 		write(w, http.StatusOK, map[string]any{"id": p[1], "metadata": ws.metadata})
 	case len(p) == 4 && p[2] == "peers" && r.Method == http.MethodPut:
 		if !ws.peers[p[3]] {
