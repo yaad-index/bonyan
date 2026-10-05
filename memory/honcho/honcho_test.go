@@ -929,3 +929,16 @@ func TestAResultFromAnotherWorkspaceIsDropped(t *testing.T) {
 	assert.Equal(t, []string{"mine", "mine too"}, texts(h))
 	assert.Equal(t, []string{ana + "--" + s1 + "-g1"}, f.sessions(ws), "the other workspace's generation is not counted")
 }
+
+// An erase waits for the subject's own sessions to be removed, not for a
+// session the service names another workspace for, which this Backend could
+// never remove.
+func TestAnEraseDoesNotWaitForAnotherWorkspacesSession(t *testing.T) {
+	f, srv := newFake(t)
+	b, err := honcho.Open(honcho.Options{URL: srv.URL, Namespace: "test", DeleteWait: 300 * time.Millisecond})
+	require.NoError(t, err)
+	_, err = b.Write(ctx, event("s1", "hello", start))
+	require.NoError(t, err)
+	f.foreign = ana + "--" + hex.EncodeToString([]byte("s1")) + "-g9"
+	require.NoError(t, b.DeleteSubject(ctx, "ana"))
+}
