@@ -53,6 +53,7 @@ func Run(t *testing.T, newStorage func(t *testing.T) Open, opts ...Option) {
 		{"LayersAreSeparate", layersAreSeparate},
 		{"RecallHonoursTheLimit", recallHonoursTheLimit},
 		{"RecallFindsAFactByItsText", recallFindsAFactByItsText},
+		{"RecallNeverCrossesSubjects", recallNeverCrossesSubjects},
 		{"DeleteSubjectRemovesEventsAndFacts", deleteSubjectRemovesEventsAndFacts},
 		{"ReadsHonourTheCutoff", readsHonourTheCutoff},
 		{"DeleteBeforeRemovesOlderRecords", deleteBeforeRemovesOlderRecords},
@@ -238,6 +239,23 @@ func recallMatchesAnyWord(t *testing.T, b memory.Backend) {
 	got, err := b.Recall(ctx, "ana", "how should we contact her, by mail?", 10, never)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"prefers mail over calls"}, texts(got))
+}
+
+// Recall for one subject never returns another's facts, with a query both
+// match as well as with none: a backend keeping subjects side by side in one
+// store must keep them apart on every read.
+func recallNeverCrossesSubjects(t *testing.T, b memory.Backend) {
+	write(t, b,
+		fact("ana", "ana rides trains", start),
+		fact("bo", "bo rides trains", start.Add(time.Second)),
+	)
+	for _, c := range []struct{ subject, want string }{{"ana", "ana rides trains"}, {"bo", "bo rides trains"}} {
+		for _, q := range []string{"", "rides trains", c.want} {
+			got, err := b.Recall(ctx, c.subject, q, 10, never)
+			require.NoError(t, err)
+			assert.Equal(t, []string{c.want}, texts(got), "subject %s, query %q", c.subject, q)
+		}
+	}
 }
 
 func deleteSubjectRemovesEventsAndFacts(t *testing.T, b memory.Backend) {
