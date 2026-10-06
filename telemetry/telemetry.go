@@ -73,11 +73,11 @@ func New(opts Options) (*Telemetry, error) {
 		mp = otel.GetMeterProvider()
 	}
 	m := mp.Meter(scope, metric.WithSchemaURL(SchemaURL))
-	duration, err := semconvgenai.NewClientOperationDuration(m)
+	duration, err := semconvgenai.NewClientOperationDuration(m, metric.WithExplicitBucketBoundaries(durationBuckets...))
 	if err != nil {
 		return nil, err
 	}
-	tokens, err := semconvgenai.NewClientTokenUsage(m)
+	tokens, err := semconvgenai.NewClientTokenUsage(m, metric.WithExplicitBucketBoundaries(tokenBuckets...))
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func New(opts Options) (*Telemetry, error) {
 		return nil, err
 	}
 	score, err := m.Float64Histogram(metricEvalScore, metric.WithUnit("1"),
-		metric.WithDescription("A score an evaluator gave a finished run."))
+		metric.WithDescription("A score an evaluator gave a finished run."), metric.WithExplicitBucketBoundaries(scoreBuckets...))
 	if err != nil {
 		return nil, err
 	}

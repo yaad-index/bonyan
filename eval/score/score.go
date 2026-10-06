@@ -18,7 +18,9 @@ type Score struct {
 	Evaluator string
 	// Metric names what was measured, within the evaluator.
 	Metric string
-	Value  float64
+	// Value is a 0/1 flag or a non-negative count, as Metric names; none of
+	// the evaluators bonyan ships gives a fraction.
+	Value float64
 }
 
 // Subject is what an evaluator scores: one run's recording and, when a runner

@@ -79,3 +79,27 @@ const (
 	keyPromptID      = attribute.Key("bonyan.prompt.id")
 	keyPromptHash    = attribute.Key("bonyan.prompt.hash")
 )
+
+// The bucket boundaries of bonyan's histograms, set when each is created so
+// any meter provider records them. Without them the SDK's defaults (0, 5, 10,
+// 25 ...) apply, which are sized for milliseconds.
+var (
+	// durationBuckets are the GenAI conventions' advised boundaries for
+	// gen_ai.client.operation.duration, in seconds: 10ms to about 82s.
+	durationBuckets = []float64{0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92}
+	// tokenBuckets are the advised boundaries for gen_ai.client.token.usage.
+	tokenBuckets = []float64{1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864}
+	// scoreBuckets serve both kinds of score (score.Score.Value): a 0/1 flag
+	// falls at or below 0.5 or 1, and a count into doubling buckets up to
+	// 2^26.
+	scoreBuckets = append([]float64{0.5}, doubling(1, 1<<26)...)
+)
+
+// doubling is from, 2*from, 4*from ... up to and including to.
+func doubling(from, to float64) []float64 {
+	var out []float64
+	for v := from; v <= to; v *= 2 {
+		out = append(out, v)
+	}
+	return out
+}
