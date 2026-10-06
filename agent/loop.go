@@ -85,6 +85,9 @@ type Agent struct {
 	Limits Limits
 	// MaxOutputTokens caps every model call (ADR 0001 §11 requires a cap).
 	MaxOutputTokens int
+	// Temperature, when set, is the sampling temperature of every model
+	// call. Nil leaves it to each provider's default.
+	Temperature *float64
 	// Retry is applied to every call, outside the budget and recording, so
 	// each attempt is charged and recorded.
 	Retry model.RetryPolicy
@@ -278,6 +281,9 @@ func prepare(a Agent) (*setup, error) {
 	}
 	if a.MaxOutputTokens <= 0 {
 		return nil, budget.ErrNoOutputCap
+	}
+	if t := a.Temperature; t != nil && !(*t >= 0) {
+		return nil, fmt.Errorf("agent: temperature must not be negative, got %v", *t)
 	}
 	for _, m := range a.Models {
 		if m.Chat == nil {
@@ -496,6 +502,7 @@ func (r *run) steps(ctx context.Context, maxSteps, first int, rep Report) (Outco
 		}
 		r.recordDropped(ctx, dropped)
 		req.MaxOutputTokens = r.a.MaxOutputTokens
+		req.Temperature = r.a.Temperature
 		if r.a.Output != nil {
 			req.Schema = r.a.Output.Schema.JSON()
 		}

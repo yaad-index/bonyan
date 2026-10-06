@@ -159,6 +159,9 @@ func (c *tracedChat) Chat(ctx context.Context, req model.ChatRequest) (model.Cha
 	// array.
 	common := slices.Clip(t.withProvider([]attribute.KeyValue{opChat, keyRequestModel.String(c.model)}))
 	attrs := append(common, keyRequestMaxTokens.Int(req.MaxOutputTokens))
+	if req.Temperature != nil {
+		attrs = append(attrs, keyRequestTemperature.Float64(*req.Temperature))
+	}
 	if ref, ok := prompt.RefOf(ctx); ok {
 		if ref.ID != "" {
 			attrs = append(attrs, keyPromptID.String(ref.ID))

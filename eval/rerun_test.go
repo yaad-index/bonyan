@@ -773,3 +773,25 @@ func TestAReplayedResultKeepsItsServer(t *testing.T) {
 		})
 	}
 }
+
+// A variant's temperature is set on every call of its runs; the others keep
+// the agent's.
+func TestAVariantSetsTheTemperature(t *testing.T) {
+	run := recorded(t, searchAgent(&searchThenAnswer{args: `{"q":"x"}`}, &liveTools{out: "r"}), "find x")
+	m := &searchThenAnswer{args: `{"q":"x"}`}
+	a := searchAgent(m, &liveTools{})
+	agentTemp, variantTemp := 0.2, 0.9
+	a.Temperature = &agentTemp
+	rep, err := eval.Rerun{Agent: a, Variants: []eval.Variant{{Name: "agent"}, {Name: "warm", Temperature: &variantTemp}}}.Run(context.Background(), run)
+	require.NoError(t, err)
+	require.Len(t, rep.Cases, 2)
+	require.Len(t, m.reqs, 4)
+	for i, req := range m.reqs {
+		want := agentTemp
+		if i >= 2 {
+			want = variantTemp
+		}
+		require.NotNil(t, req.Temperature, "call %d", i)
+		assert.Equal(t, want, *req.Temperature, "call %d", i)
+	}
+}

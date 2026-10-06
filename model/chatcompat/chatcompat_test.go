@@ -379,3 +379,18 @@ func TestASectionIsSentWithItsMarking(t *testing.T) {
 	require.Len(t, msgs, 2)
 	assert.Equal(t, sec.Render(), msgs[1].(map[string]any)["content"])
 }
+
+// The temperature is sent when the request sets it, zero included, and left
+// out otherwise, so the provider's default applies.
+func TestTemperatureIsSentOnlyWhenSet(t *testing.T) {
+	ok := reply(`{"choices":[{"message":{"content":"x"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	s, c := start(t, ok, ok, ok)
+	zero, warm := 0.0, 0.7
+	for _, temp := range []*float64{nil, &zero, &warm} {
+		_, err := c.Chat(context.Background(), model.ChatRequest{Messages: []model.Message{user("x")}, MaxOutputTokens: 10, Temperature: temp})
+		require.NoError(t, err)
+	}
+	assert.NotContains(t, s.bodies[0], "temperature")
+	assert.Equal(t, 0.0, s.bodies[1]["temperature"])
+	assert.Equal(t, 0.7, s.bodies[2]["temperature"])
+}

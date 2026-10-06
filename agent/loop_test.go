@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"testing"
@@ -385,11 +386,13 @@ func TestToolResults(t *testing.T) {
 func TestAnAgentThatCannotRunIsAnError(t *testing.T) {
 	ok := agent.Model{Name: "main", Chat: &scripted{steps: stepsOf(answer("x"))}}
 	for name, a := range map[string]agent.Agent{
-		"no model":       newAgent(),
-		"no output cap":  func() agent.Agent { a := newAgent(ok); a.MaxOutputTokens = 0; return a }(),
-		"unpriced model": newAgent(agent.Model{Name: "unpriced", Chat: ok.Chat}),
-		"nil model":      newAgent(agent.Model{Name: "main"}),
-		"invalid limits": func() agent.Agent { a := newAgent(ok); a.Limits = agent.Limits{MaxSteps: 1}; return a }(),
+		"no model":             newAgent(),
+		"no output cap":        func() agent.Agent { a := newAgent(ok); a.MaxOutputTokens = 0; return a }(),
+		"unpriced model":       newAgent(agent.Model{Name: "unpriced", Chat: ok.Chat}),
+		"nil model":            newAgent(agent.Model{Name: "main"}),
+		"invalid limits":       func() agent.Agent { a := newAgent(ok); a.Limits = agent.Limits{MaxSteps: 1}; return a }(),
+		"negative temperature": func() agent.Agent { a := newAgent(ok); a.Temperature = ptr(-0.1); return a }(),
+		"NaN temperature":      func() agent.Agent { a := newAgent(ok); a.Temperature = ptr(math.NaN()); return a }(),
 	} {
 		_, _, err := agent.Run(context.Background(), a, input("go"))
 		require.Error(t, err, name)
@@ -429,4 +432,23 @@ func TestARecordedRunReplays(t *testing.T) {
 	out, _, err := agent.Run(context.Background(), c, input("find y"))
 	require.NoError(t, err)
 	assert.Equal(t, agent.ReasonModelFailed, out.Reason())
+}
+
+func ptr(f float64) *float64 { return &f }
+
+// The agent's temperature is set on every call of the run, and a run without
+// one leaves it unset.
+func TestTheTemperatureIsSetOnEveryCall(t *testing.T) {
+	for name, temp := range map[string]*float64{"unset": nil, "zero": ptr(0), "set": ptr(0.7)} {
+		m := &scripted{steps: stepsOf(toolCall("search", `{}`), answer("done"))}
+		a := newAgent(agent.Model{Name: "main", Chat: m})
+		a.Temperature = temp
+		out, _, err := agent.Run(context.Background(), a, input("go"))
+		require.NoError(t, err, name)
+		require.True(t, out.Cleared(), name)
+		require.Len(t, m.reqs, 2, name)
+		for _, req := range m.reqs {
+			assert.Equal(t, temp, req.Temperature, name)
+		}
+	}
 }

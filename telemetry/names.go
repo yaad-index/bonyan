@@ -18,6 +18,7 @@ const (
 	keyProviderName       = semconv.GenAIProviderNameKey
 	keyRequestModel       = semconv.GenAIRequestModelKey
 	keyRequestMaxTokens   = semconv.GenAIRequestMaxTokensKey
+	keyRequestTemperature = semconv.GenAIRequestTemperatureKey
 	keyResponseFinish     = semconv.GenAIResponseFinishReasonsKey
 	keyUsageInputTokens   = semconv.GenAIUsageInputTokensKey
 	keyUsageOutputTokens  = semconv.GenAIUsageOutputTokensKey

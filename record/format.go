@@ -115,6 +115,9 @@ type Request struct {
 	Tools           []Tool          `json:"tools,omitempty"`
 	Schema          json.RawMessage `json:"schema,omitempty"`
 	MaxOutputTokens int             `json:"max_output_tokens"`
+	// Temperature is the request's sampling temperature; absent when the
+	// request left it to the provider.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 // Message is a recorded message.
