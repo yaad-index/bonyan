@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/yaad-index/bonyan/compare/v0.2.0...v0.2.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **telemetry:** histogram buckets sized for seconds, tokens and scores ([#79](https://github.com/yaad-index/bonyan/issues/79)) ([5cc035e](https://github.com/yaad-index/bonyan/commit/5cc035e97ecf7bb14340d5271e8b3de429faa5cf))
+
 ## [0.2.0](https://github.com/yaad-index/bonyan/compare/v0.1.0...v0.2.0) (2026-10-06)
 
 
