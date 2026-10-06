@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/yaad-index/bonyan/compare/v0.1.0...v0.2.0) (2026-10-06)
+
+
+### Features
+
+* optional sampling temperature on chat requests ([#76](https://github.com/yaad-index/bonyan/issues/76)) ([767e99c](https://github.com/yaad-index/bonyan/commit/767e99c5c2dc4f07d3719c0c18ccfca1f446e976))
+
 ## 0.1.0 (2026-10-03)
 
 
