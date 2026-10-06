@@ -87,6 +87,9 @@ type ChatRequest struct {
 	Schema json.RawMessage
 	// MaxOutputTokens caps the response. A budgeted run requires it (§11).
 	MaxOutputTokens int
+	// Temperature, when set, is the sampling temperature. Nil leaves it to
+	// the provider's default.
+	Temperature *float64
 }
 
 // ChatResponse is a chat model's reply.

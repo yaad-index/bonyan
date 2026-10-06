@@ -624,3 +624,42 @@ func TestEntriesAreGroupedByRun(t *testing.T) {
 	assert.Equal(t, []record.Event{{Slot: record.SlotTool, Name: "calendar", Failure: record.ToolFailed}}, runs[2].Events)
 	assert.Equal(t, &record.End{Outcome: record.OutcomeCleared, Steps: 1, Tokens: 58, Cost: 7}, runs[2].End)
 }
+
+// The temperature is recorded, and a replay asked at another temperature, or
+// at none, refuses rather than answering as if it were the same call.
+func TestTheTemperatureIsRecordedAndMatched(t *testing.T) {
+	f := openFile(t, record.FileOptions{})
+	live := record.Chat(&scripted{steps: steps}, "main", newRecorder(t, f))
+	req := requests[0]
+	warm := 0.7
+	req.Temperature = &warm
+	_, err := live.Chat(context.Background(), req)
+	require.NoError(t, err)
+	h, calls, raw := readFile(t, f)
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].Request.Temperature)
+	assert.Equal(t, 0.7, *calls[0].Request.Temperature)
+	assert.Contains(t, raw, `"temperature":0.7`)
+
+	replay := record.NewReplay(h, calls, nil)
+	cold := 0.0
+	for name, temp := range map[string]*float64{"none": nil, "another": &cold} {
+		other := req
+		other.Temperature = temp
+		_, err = replay.Model("main").Chat(context.Background(), other)
+		require.ErrorIs(t, err, record.ErrMismatch, name)
+	}
+	_, err = replay.Model("main").Chat(context.Background(), req)
+	require.NoError(t, err)
+}
+
+// A request without a temperature is recorded without one.
+func TestAnUnsetTemperatureIsNotRecorded(t *testing.T) {
+	f := openFile(t, record.FileOptions{})
+	live := record.Chat(&scripted{steps: steps}, "main", newRecorder(t, f))
+	_, err := live.Chat(context.Background(), requests[0])
+	require.NoError(t, err)
+	_, calls, raw := readFile(t, f)
+	assert.Nil(t, calls[0].Request.Temperature)
+	assert.NotContains(t, raw, "temperature")
+}

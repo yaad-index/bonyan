@@ -61,6 +61,8 @@ type Variant struct {
 	// Prompt, when set, replaces the agent's instructions or prompt, so a
 	// grid can compare prompt versions.
 	Prompt *prompt.Prompt
+	// Temperature, when set, replaces the agent's sampling temperature.
+	Temperature *float64
 }
 
 // RerunReport is what a re-run found. Each result's Case is the variant's
@@ -126,6 +128,9 @@ func (r Rerun) Run(ctx context.Context, recorded record.Run) (RerunReport, error
 		}
 		if v.Prompt != nil {
 			a.Instructions, a.Prompt = content.Trusted{}, v.Prompt
+		}
+		if v.Temperature != nil {
+			a.Temperature = v.Temperature
 		}
 		a.Hooks = a.Hooks.Only(r.Hooks...)
 		a.Memory, a.Session, a.Approvals = nil, "", nil

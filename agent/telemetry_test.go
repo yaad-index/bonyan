@@ -234,7 +234,9 @@ func TestAFailedCallRecordsItsKindNotItsText(t *testing.T) {
 // this test rather than renaming what dashboards and queries read.
 func TestTelemetryNames(t *testing.T) {
 	opts := telemetry.Options{CaptureContent: true, ProviderName: "a-provider"}
-	ok := observe(t, contentRun(t), opts, input(textInput))
+	withTemperature := contentRun(t)
+	withTemperature.Temperature = ptr(0.2)
+	ok := observe(t, withTemperature, opts, input(textInput))
 	failed := observe(t, newAgent(agent.Model{Name: "main", Chat: &scripted{steps: stepsOf(fail(errors.New("x")))}}), opts, input("go"))
 
 	// The keys seen under each span name and each metric, with the values of
@@ -282,7 +284,7 @@ func TestTelemetryNames(t *testing.T) {
 		"gen_ai.operation.name=chat", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.request.max_tokens",
 		"gen_ai.system_instructions", "gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.response.finish_reasons",
 		"gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "bonyan.usage.cost", "error.type",
-		"bonyan.prompt.hash",
+		"bonyan.prompt.hash", "gen_ai.request.temperature",
 	}
 	want := map[string][]string{
 		"span invoke_agent helper": append(slices.Clone(run), "gen_ai.agent.name"),
@@ -369,4 +371,19 @@ func TestToolTypeFollowsTheResultsSource(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, want, v.AsString())
 	}
+}
+
+// A chat span carries the temperature the request set, and none when it left
+// the temperature to the provider.
+func TestAChatSpanCarriesTheTemperature(t *testing.T) {
+	unset := observe(t, newAgent(agent.Model{Name: "main", Chat: &scripted{steps: stepsOf(answer("x"))}}), telemetry.Options{}, input("go"))
+	_, ok := attr(unset.span(t, "chat main"), "gen_ai.request.temperature")
+	assert.False(t, ok, "no temperature set")
+
+	a := newAgent(agent.Model{Name: "main", Chat: &scripted{steps: stepsOf(answer("x"))}})
+	a.Temperature = ptr(0)
+	set := observe(t, a, telemetry.Options{}, input("go"))
+	v, ok := attr(set.span(t, "chat main"), "gen_ai.request.temperature")
+	require.True(t, ok, "a zero temperature is still set")
+	assert.Equal(t, 0.0, v.AsFloat64())
 }

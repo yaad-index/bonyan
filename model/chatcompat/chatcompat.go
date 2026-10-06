@@ -208,6 +208,7 @@ type wireRequest struct {
 	Tools          []wireTool          `json:"tools,omitempty"`
 	ResponseFormat *wireResponseFormat `json:"response_format,omitempty"`
 	MaxTokens      int                 `json:"max_tokens,omitempty"`
+	Temperature    *float64            `json:"temperature,omitempty"`
 }
 
 // wireRequest builds the request body. A request from the agent loop has passed
@@ -216,7 +217,7 @@ type wireRequest struct {
 // the default marking; a bare untrusted part, which only a program calling the
 // adapter directly can send, is sent as it is.
 func (c *Client) wireRequest(req model.ChatRequest) wireRequest {
-	out := wireRequest{Model: c.opts.Model, MaxTokens: req.MaxOutputTokens}
+	out := wireRequest{Model: c.opts.Model, MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature}
 	for _, m := range req.Messages {
 		wm := wireMessage{Role: string(m.Role), ToolCallID: m.ToolCallID}
 		if len(m.Parts) > 0 || len(m.ToolCalls) == 0 {

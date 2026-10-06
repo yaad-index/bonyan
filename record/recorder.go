@@ -342,7 +342,7 @@ func (r redactor) raw(b json.RawMessage) json.RawMessage {
 }
 
 func (r redactor) request(req model.ChatRequest) Request {
-	out := Request{Schema: r.raw(req.Schema), MaxOutputTokens: req.MaxOutputTokens}
+	out := Request{Schema: r.raw(req.Schema), MaxOutputTokens: req.MaxOutputTokens, Temperature: req.Temperature}
 	for _, m := range req.Messages {
 		rm := Message{Role: m.Role, ToolCallID: m.ToolCallID}
 		for _, p := range m.Parts {
