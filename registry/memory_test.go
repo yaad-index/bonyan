@@ -167,3 +167,59 @@ func TestMemoryNeedsANamespace(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "test", got, "the factory is given the configured namespace")
 }
+
+// A backend registered with secrets resolves the names the memory
+// configuration grants, through the program's resolver, so what it resolves is
+// scrubbed like any other secret; a name outside the grant is refused.
+func TestASecretMemoryBackendResolvesItsGrant(t *testing.T) {
+	t.Setenv("BONYAN_REGISTRY_MEMORY_TOKEN", "TOKEN-7f3")
+	t.Setenv("BONYAN_REGISTRY_MEMORY_OTHER", "OTHER-7f3")
+	r := newRegistry(t)
+	var got *secret.Scoped
+	require.NoError(t, r.RegisterMemoryWithSecrets("tokened", func(ns string, _ json.RawMessage, s *secret.Scoped) (memory.Backend, error) {
+		got = s
+		return inmem.New(ns), nil
+	}))
+	cfg := memoryConfig("tokened", "1h")
+	cfg.Memory.Secrets = []string{"BONYAN_REGISTRY_MEMORY_TOKEN"}
+	c, err := r.Assemble(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	ctx := context.Background()
+	v, err := got.Resolve(ctx, "BONYAN_REGISTRY_MEMORY_TOKEN")
+	require.NoError(t, err)
+	assert.Equal(t, "TOKEN-7f3", v.Reveal())
+	assert.Equal(t, "the token is "+secret.Redacted, c.Secrets.Scrubber().Scrub("the token is TOKEN-7f3"))
+
+	_, err = got.Resolve(ctx, "BONYAN_REGISTRY_MEMORY_OTHER")
+	require.ErrorIs(t, err, secret.ErrNotGranted)
+}
+
+// With no grant configured, a backend registered with secrets can resolve
+// nothing.
+func TestASecretMemoryBackendWithoutAGrantResolvesNothing(t *testing.T) {
+	t.Setenv("BONYAN_REGISTRY_MEMORY_TOKEN", "TOKEN-7f3")
+	r := newRegistry(t)
+	var got *secret.Scoped
+	require.NoError(t, r.RegisterMemoryWithSecrets("tokened", func(ns string, _ json.RawMessage, s *secret.Scoped) (memory.Backend, error) {
+		got = s
+		return inmem.New(ns), nil
+	}))
+	_, err := r.Assemble(memoryConfig("tokened", "1h"))
+	require.NoError(t, err)
+	_, err = got.Resolve(context.Background(), "BONYAN_REGISTRY_MEMORY_TOKEN")
+	require.ErrorIs(t, err, secret.ErrNotGranted)
+}
+
+// A memory implementation name is taken once, whichever way it was registered.
+func TestMemoryNamesAreSharedByBothRegistrations(t *testing.T) {
+	r := newRegistry(t)
+	require.NoError(t, r.RegisterMemory("taken", func(ns string, _ json.RawMessage) (memory.Backend, error) { return inmem.New(ns), nil }))
+	err := r.RegisterMemoryWithSecrets("taken", func(ns string, _ json.RawMessage, _ *secret.Scoped) (memory.Backend, error) {
+		return inmem.New(ns), nil
+	})
+	require.ErrorIs(t, err, registry.ErrDuplicate)
+	require.Error(t, r.RegisterMemoryWithSecrets("nil", nil))
+	require.Error(t, r.RegisterMemory("nil", nil))
+}

@@ -71,6 +71,7 @@ import (
 
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/memory"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -114,6 +115,11 @@ type Options struct {
 	Instructions string
 	// Token authenticates to the service, when it requires it.
 	Token string
+	// Secrets and TokenName locate the token instead: it is resolved on every
+	// call, so a rotated token is picked up and the value is in the
+	// resolver's scrubber. It cannot be set with Token.
+	Secrets   *secret.Scoped
+	TokenName string
 	// HTTPClient makes the calls; nil is a client with a 30 second timeout.
 	HTTPClient *http.Client
 	// DeleteWait bounds how long deleting a subject waits for the service's
@@ -167,6 +173,18 @@ func Open(opts Options) (*Backend, error) {
 			return nil, fmt.Errorf("honcho: the prefix and namespace are too long for a workspace name (%d characters, at most %d)", len(ws), maxID)
 		}
 	}
+	switch {
+	case opts.TokenName != "" && opts.Token != "":
+		return nil, errors.New("honcho: a token and a token name: give one")
+	case opts.TokenName != "" && opts.Secrets == nil:
+		return nil, errors.New("honcho: a token name needs Secrets")
+	case opts.TokenName != "":
+		// Resolved once here so a name that is not granted or not held fails
+		// when the backend is opened, not at its first call.
+		if _, err := opts.Secrets.Resolve(context.Background(), opts.TokenName); err != nil {
+			return nil, fmt.Errorf("honcho: token: %w", err)
+		}
+	}
 	hc := opts.HTTPClient
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second}
@@ -176,7 +194,7 @@ func Open(opts Options) (*Backend, error) {
 		wait = 30 * time.Second
 	}
 	return &Backend{
-		c:          &client{base: strings.TrimRight(opts.URL, "/"), http: hc, token: opts.Token},
+		c:          &client{base: strings.TrimRight(opts.URL, "/"), http: hc, token: opts.Token, secrets: opts.Secrets, tokenName: opts.TokenName},
 		ns:         opts.Namespace,
 		ws:         ws,
 		cfg:        configuration{Reasoning: reasoning{Enabled: opts.Derive, CustomInstructions: opts.Instructions}},
@@ -193,12 +211,21 @@ type factoryOptions struct {
 	Workspace    string `json:"workspace"`
 	Derive       bool   `json:"derive"`
 	Instructions string `json:"instructions"`
+	// TokenSecret names the secret holding the token. It is never the token.
+	TokenSecret string `json:"token_secret"`
 }
 
 // Factory builds a Backend from configuration options, opened with namespace,
-// for registry.Registry.RegisterMemory. A token is not configured this way:
-// a program needing one opens the Backend itself.
+// for registry.Registry.RegisterMemory. It has no secrets, so it refuses
+// token_secret; SecretFactory takes one.
 func Factory(namespace string, options json.RawMessage) (memory.Backend, error) {
+	return SecretFactory(namespace, options, nil)
+}
+
+// SecretFactory is Factory for registry.Registry.RegisterMemoryWithSecrets:
+// the token_secret option names a secret, resolved through secrets on every
+// call. The memory configuration must grant the name.
+func SecretFactory(namespace string, options json.RawMessage, secrets *secret.Scoped) (memory.Backend, error) {
 	var o factoryOptions
 	if len(options) > 0 {
 		dec := json.NewDecoder(strings.NewReader(string(options)))
@@ -207,7 +234,10 @@ func Factory(namespace string, options json.RawMessage) (memory.Backend, error) 
 			return nil, fmt.Errorf("honcho: options: %w", err)
 		}
 	}
-	return Open(Options{URL: o.URL, Namespace: namespace, Prefix: o.Prefix, Workspace: o.Workspace, Derive: o.Derive, Instructions: o.Instructions})
+	if o.TokenSecret != "" && secrets == nil {
+		return nil, errors.New("honcho: token_secret needs a backend registered with secrets (SecretFactory)")
+	}
+	return Open(Options{URL: o.URL, Namespace: namespace, Prefix: o.Prefix, Workspace: o.Workspace, Derive: o.Derive, Instructions: o.Instructions, Secrets: secrets, TokenName: o.TokenSecret})
 }
 
 // Namespace is the namespace b was opened with.

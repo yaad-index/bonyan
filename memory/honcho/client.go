@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/yaad-index/bonyan/secret"
 )
 
 // errNotFound is a resource the service does not hold.
@@ -26,6 +28,9 @@ type client struct {
 	base  string
 	http  *http.Client
 	token string
+	// secrets and tokenName locate the token instead of token.
+	secrets   *secret.Scoped
+	tokenName string
 }
 
 // call sends body as JSON to path with method and decodes the answer into
@@ -50,8 +55,16 @@ func (c *client) call(ctx context.Context, method, op, path string, query url.Va
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	token := c.token
+	if c.tokenName != "" {
+		v, err := c.secrets.Resolve(ctx, c.tokenName)
+		if err != nil {
+			return fmt.Errorf("honcho: %s: token: %w", op, err)
+		}
+		token = v.Reveal()
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

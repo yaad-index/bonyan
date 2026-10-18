@@ -181,7 +181,7 @@ func New() *Registry {
 		hooks:       newSlot[hook.Hook](SlotHook),
 		secrets:     newSlot[secret.Source](SlotSecret),
 		sinks:       newSlot[record.Sink](SlotRecording),
-		memories:    &memorySlot{factories: map[string]MemoryFactory{}},
+		memories:    &memorySlot{factories: map[string]SecretMemoryFactory{}},
 		evaluators:  newSlot[score.Evaluator](SlotEvaluator),
 		queues:      newSlot[record.Queue](SlotQueue),
 		approvals:   newSlot[approval.Store](SlotApprovals),
@@ -197,7 +197,7 @@ func New() *Registry {
 	}
 	r.secrets.factories[SecretDir] = dirSource
 	r.sinks.factories[SinkFile] = fileSink
-	r.memories.factories[MemoryInMem] = func(namespace string, _ json.RawMessage) (memory.Backend, error) {
+	r.memories.factories[MemoryInMem] = func(namespace string, _ json.RawMessage, _ *secret.Scoped) (memory.Backend, error) {
 		return inmem.New(namespace), nil
 	}
 	return r
@@ -273,12 +273,17 @@ func (r *Registry) RegisterSink(name string, f Factory[record.Sink]) error {
 // with namespace (ADR 0001 §4).
 type MemoryFactory func(namespace string, options json.RawMessage) (memory.Backend, error)
 
+// SecretMemoryFactory is a MemoryFactory for a backend that needs secrets, such
+// as a token for its service. secrets reaches only the names the memory
+// configuration grants (MemoryConfig.Secrets).
+type SecretMemoryFactory func(namespace string, options json.RawMessage, secrets *secret.Scoped) (memory.Backend, error)
+
 // memorySlot is the memory slot: its factories take the namespace too.
 type memorySlot struct {
-	factories map[string]MemoryFactory
+	factories map[string]SecretMemoryFactory
 }
 
-func (s *memorySlot) register(name string, f MemoryFactory) error {
+func (s *memorySlot) register(name string, f SecretMemoryFactory) error {
 	if name == "" {
 		return fmt.Errorf("registry: %s: empty implementation name", SlotMemory)
 	}
@@ -301,14 +306,14 @@ func (s *memorySlot) names() []string {
 	return out
 }
 
-// build builds the configured backend, opened with namespace. memory.NewStore
-// refuses one that reports another.
-func (s *memorySlot) build(cfg SlotConfig, namespace string) (memory.Backend, error) {
+// build builds the configured backend, opened with namespace and handed
+// secrets. memory.NewStore refuses one that reports another namespace.
+func (s *memorySlot) build(cfg SlotConfig, namespace string, secrets *secret.Scoped) (memory.Backend, error) {
 	f, ok := s.factories[cfg.Impl]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s %q (registered: %v)", ErrUnknown, SlotMemory, cfg.Impl, s.names())
 	}
-	b, err := f(namespace, cfg.Options)
+	b, err := f(namespace, cfg.Options, secrets)
 	if err != nil {
 		return nil, fmt.Errorf("registry: build %s %q: %w", SlotMemory, cfg.Impl, err)
 	}
@@ -320,6 +325,20 @@ func (s *memorySlot) build(cfg SlotConfig, namespace string) (memory.Backend, er
 
 // RegisterMemory adds a memory backend under name.
 func (r *Registry) RegisterMemory(name string, f MemoryFactory) error {
+	var sf SecretMemoryFactory
+	if f != nil {
+		sf = func(namespace string, options json.RawMessage, _ *secret.Scoped) (memory.Backend, error) {
+			return f(namespace, options)
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.memories.register(name, sf)
+}
+
+// RegisterMemoryWithSecrets adds a memory backend that needs secrets under
+// name. A name is taken once, by either this or RegisterMemory.
+func (r *Registry) RegisterMemoryWithSecrets(name string, f SecretMemoryFactory) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.memories.register(name, f)
@@ -417,6 +436,9 @@ type MemoryConfig struct {
 	// Retention is how long a record is kept, as a Go duration such as
 	// "720h". It is required.
 	Retention string `json:"retention"`
+	// Secrets are the names the backend may resolve, such as the one holding
+	// its service's token. A backend registered with RegisterMemory gets none.
+	Secrets []string `json:"secrets,omitempty"`
 }
 
 // Components are the assembled parts. Every value is bonyan's wrapper around the
@@ -712,6 +734,22 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		}
 	}
 
+	// The secret sources are built before the memory backend, which may need
+	// to resolve through them.
+	secretCfgs := cfg.Secrets
+	if len(secretCfgs) == 0 {
+		secretCfgs = []SlotConfig{{Impl: SecretEnv}}
+	}
+	sources := make([]secret.Source, 0, len(secretCfgs))
+	for _, sc := range secretCfgs {
+		s, err := r.secrets.build(sc)
+		if err != nil {
+			return Components{}, err
+		}
+		sources = append(sources, s)
+	}
+	resolver := secret.NewResolver(sources...)
+
 	var backend memory.Backend
 	var retention time.Duration
 	if cfg.Memory != nil {
@@ -721,7 +759,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		if cfg.Memory.Namespace == "" {
 			return Components{}, fmt.Errorf("registry: memory namespace: required")
 		}
-		if backend, err = r.memories.build(cfg.Memory.SlotConfig, cfg.Memory.Namespace); err != nil {
+		if backend, err = r.memories.build(cfg.Memory.SlotConfig, cfg.Memory.Namespace, resolver.Scope(cfg.Memory.Secrets...)); err != nil {
 			return Components{}, err
 		}
 	}
@@ -745,20 +783,7 @@ func (r *Registry) Assemble(cfg Config, opts ...Option) (Components, error) {
 		evaluators = append(evaluators, guardedEvaluator{name: name, inner: e})
 	}
 
-	secretCfgs := cfg.Secrets
-	if len(secretCfgs) == 0 {
-		secretCfgs = []SlotConfig{{Impl: SecretEnv}}
-	}
-	sources := make([]secret.Source, 0, len(secretCfgs))
-	for _, sc := range secretCfgs {
-		s, err := r.secrets.build(sc)
-		if err != nil {
-			return Components{}, err
-		}
-		sources = append(sources, s)
-	}
-
-	out := Components{Secrets: secret.NewResolver(sources...), Evaluators: evaluators}
+	out := Components{Secrets: resolver, Evaluators: evaluators}
 	sink := a.sink
 	if cfg.Recording != nil {
 		if sink, err = r.sinks.build(*cfg.Recording); err != nil {
