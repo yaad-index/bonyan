@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/yaad-index/bonyan/compare/memory/honcho/v0.2.1...memory/honcho/v0.3.0) (2026-10-18)
+
+
+### Features
+
+* a memory backend can resolve granted secrets, and honcho takes its token that way ([#83](https://github.com/yaad-index/bonyan/issues/83)) ([4e11856](https://github.com/yaad-index/bonyan/commit/4e118563c0b6ffe3fad81573aa071f0596dd665f))
+
 ## [0.2.1](https://github.com/yaad-index/bonyan/compare/memory/honcho/v0.2.0...memory/honcho/v0.2.1) (2026-10-05)
 
 
