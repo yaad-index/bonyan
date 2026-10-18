@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/honcho"
 	"github.com/yaad-index/bonyan/memory/memorytest"
+	"github.com/yaad-index/bonyan/secret"
 	"github.com/yaad-index/bonyan/trust"
 )
 
@@ -327,6 +330,72 @@ func TestTheFactory(t *testing.T) {
 	require.Error(t, err, "unknown option")
 	_, err = honcho.Factory("grove", json.RawMessage(`{}`))
 	require.Error(t, err, "no URL")
+	_, err = honcho.Factory("grove", json.RawMessage(`{"url":"`+srv.URL+`","token_secret":"BONYAN_TEST_HONCHO_TOKEN"}`))
+	require.Error(t, err, "a token secret with no secrets to resolve it")
+}
+
+// The secret-aware factory sends the token its token_secret names, resolved
+// on every call, so a rotated token is sent from the next call on; every value
+// sent is in the resolver's scrubber.
+func TestTheSecretFactorySendsTheResolvedToken(t *testing.T) {
+	const name = "BONYAN_TEST_HONCHO_TOKEN"
+	t.Setenv(name, "tok-1")
+	f, _ := newFake(t)
+	var mu sync.Mutex
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		sent = append(sent, r.Header.Get("Authorization"))
+		mu.Unlock()
+		f.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	res := secret.NewResolver(secret.Env{})
+	b, err := honcho.SecretFactory("grove", json.RawMessage(`{"url":"`+srv.URL+`","token_secret":"`+name+`"}`), res.Scope(name))
+	require.NoError(t, err)
+
+	_, err = b.Write(ctx, event("s1", "first", start))
+	require.NoError(t, err)
+	mu.Lock()
+	first := len(sent)
+	mu.Unlock()
+	require.Positive(t, first)
+	t.Setenv(name, "tok-2")
+	_, err = b.Write(ctx, event("s1", "second", start.Add(time.Minute)))
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Greater(t, len(sent), first)
+	for _, h := range sent[:first] {
+		assert.Equal(t, "Bearer tok-1", h)
+	}
+	for _, h := range sent[first:] {
+		assert.Equal(t, "Bearer tok-2", h)
+	}
+	assert.Equal(t, secret.Redacted+" "+secret.Redacted, res.Scrubber().Scrub("tok-1 tok-2"))
+}
+
+// A token secret the grant does not reach, or no source holds, fails when the
+// backend is opened; a token and a token name together are refused.
+func TestATokenSecretIsCheckedWhenOpened(t *testing.T) {
+	_, srv := newFake(t)
+	res := secret.NewResolver(secret.Env{})
+	opts := json.RawMessage(`{"url":"` + srv.URL + `","token_secret":"BONYAN_TEST_HONCHO_TOKEN"}`)
+	_, err := honcho.SecretFactory("grove", opts, res.Scope("OTHER"))
+	require.ErrorIs(t, err, secret.ErrNotGranted)
+	_, err = honcho.SecretFactory("grove", opts, res.Scope("BONYAN_TEST_HONCHO_TOKEN"))
+	require.ErrorIs(t, err, secret.ErrNotFound)
+
+	t.Setenv("BONYAN_TEST_HONCHO_TOKEN", "tok")
+	scoped := res.Scope("BONYAN_TEST_HONCHO_TOKEN")
+	_, err = honcho.Open(honcho.Options{URL: srv.URL, Namespace: "grove", Token: "tok", Secrets: scoped, TokenName: "BONYAN_TEST_HONCHO_TOKEN"})
+	require.Error(t, err)
+	_, err = honcho.Open(honcho.Options{URL: srv.URL, Namespace: "grove", TokenName: "BONYAN_TEST_HONCHO_TOKEN"})
+	require.Error(t, err)
+	b, err := honcho.SecretFactory("grove", json.RawMessage(`{"url":"`+srv.URL+`"}`), nil)
+	require.NoError(t, err, "no token secret needs no secrets")
+	assert.Equal(t, "grove", b.Namespace())
 }
 
 // A subject too long for a peer name, or a subject and session too long for a
